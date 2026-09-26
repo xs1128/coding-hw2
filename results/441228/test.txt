@@ -1,0 +1,28 @@
+case                   m     n      k  op  mod |    emu_cw    nat_cw    emu_nw |  err/bnd  path result
+square-uniform       512   512    512  NN   14 |  3.76e-16  4.67e-16  2.80e-16 |    0.052   emu PASS
+square-alpha-beta    512   512    512  NN   14 |  3.84e-16  4.55e-16  2.88e-16 |    0.054   emu PASS
+odd-shape           1000   777    333  NN   14 |  4.65e-16  6.21e-16  3.59e-16 |    0.082   emu PASS
+op-NT                300   200    150  NT   14 |  2.65e-16  3.90e-16  1.94e-16 |    0.064   emu PASS
+op-TN                300   200    150  TN   14 |  2.52e-16  3.64e-16  1.91e-16 |    0.062   emu PASS
+op-TT                300   200    150  TT   14 |  2.50e-16  5.37e-16  1.84e-16 |    0.060   emu PASS
+padded-ld            257   129     65  NN   14 |  4.64e-16  3.35e-16  3.45e-16 |    0.163   emu PASS
+1x1x1                  1     1      1  NN   14 |  0.00e+00  0.00e+00  0.00e+00 |    0.000   emu PASS
+skinny-n            4096     8   1024  NN   14 |  4.87e-16  3.90e-16  3.69e-16 |    0.050   emu PASS
+small-k             2048  2048     16  NN   14 |  3.71e-16  5.60e-16  3.27e-16 |    0.246   emu PASS
+large-k               64    64  16384  NN   14 |  5.24e-16  4.36e-17  3.91e-16 |    0.014   emu PASS
+hpl-like            2048  2048   1024  NN   14 |  6.37e-16  6.09e-16  4.79e-16 |    0.064   emu PASS
+phi0.5               512   512    512  NN   14 |  7.84e-16  6.93e-16  4.58e-16 |    0.087   emu PASS
+phi2                 512   512    512  NN   14 |  1.72e-13  3.98e-15  3.22e-16 |    0.064   emu PASS
+phi4                 512   512    512  NN   14 |  2.71e-09  4.27e-15  2.92e-16 |    0.058   emu PASS
+rowscale-2^300       512   512    512  NN   14 |  3.82e-16  4.40e-16  2.79e-16 |    0.052   emu PASS
+zero-vectors         300   300    300  NN   14 |  4.62e-16  4.55e-16  3.46e-16 |    0.083   emu PASS
+moduli-8             512   512    512  NN    8 |  7.21e-09  4.67e-16  5.35e-09 |    0.063   emu PASS
+moduli-11            512   512    512  NN   11 |  1.80e-12  4.67e-16  1.34e-12 |    0.065   emu PASS
+moduli-16            512   512    512  NN   16 |  1.23e-15  3.98e-15  6.00e-17 |    0.319   emu PASS
+col-blocked         1024  1024    512  NN   14 |  4.06e-16  4.74e-16  3.00e-16 |    0.056   emu PASS
+nan-input            128   128    128  NN   14 |  3.42e-16  3.42e-16  2.68e-16 |    0.094   nat PASS
+inf-input            128   128    128  NN   14 |  3.42e-16  3.42e-16  2.68e-16 |    0.094   nat PASS
+blocking-invariance bitwise equal to unblocked (4 blocks): PASS
+determinism        bitwise equal on repeat: PASS
+
+0 failure(s)
