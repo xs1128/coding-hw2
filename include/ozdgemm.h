@@ -40,7 +40,7 @@ typedef struct {
     double t_scale_ms;      // stage times, only filled when profiling is on
     double t_convert_ms;
     double t_gemm_ms;
-    double t_reduce_ms;
+    double t_reduce_ms;     // v0 only (separate INT32 -> uint8 pass); 0 since v1
     double t_crt_ms;
 } ozd_info_t;
 
@@ -74,6 +74,8 @@ ozd_status_t ozd_get_info(ozd_handle_t h, ozd_info_t* info);
 // Scaled operand rows/columns have 2-norm < 2^P for this many moduli. The
 // per-entry error bound of the emulation is about 4*sqrt(k)*2^-P*|A_i|*|B_j|.
 int ozd_scale_bits(int moduli);
+// Implementation version label, used to tag benchmark output.
+const char* ozd_version(void);
 cublasHandle_t ozd_cublas(ozd_handle_t h);
 
 #ifdef __cplusplus

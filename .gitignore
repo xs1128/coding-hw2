@@ -3,3 +3,4 @@ third_party/hpl-2.3/
 *.nsys-rep
 *.ncu-rep
 *.sqlite
+baseline-v0/

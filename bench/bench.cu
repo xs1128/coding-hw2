@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
             ozd_get_info(h, &info);
             const double tf = 2.0 * s.m * s.n * s.k / (med * 1e-3) / 1e12;
             std::printf("%s,%s,%s,%d,%ld,%ld,%ld,%.4f,%.4f,%.2f,%d,%.4f,%.4f,%.4f,%.4f,%.4f\n", host,
-                        gpu.c_str(), bk == OZD_BACKEND_NATIVE ? "native" : "emu_v0", md, (long)s.m,
+                        gpu.c_str(), bk == OZD_BACKEND_NATIVE ? "native" : (std::string("emu_") + ozd_version()).c_str(), md, (long)s.m,
                         (long)s.n, (long)s.k, med, mn, tf, info.col_blocks, info.t_scale_ms,
                         info.t_convert_ms, info.t_gemm_ms, info.t_reduce_ms, info.t_crt_ms);
             std::fflush(stdout);
