@@ -47,6 +47,9 @@ struct CrtConst {
     double inv_m[kMaxModuli];         // 1 / m_t
     double c32[kMaxModuli];           // 2^32 mod m_t
     double half[kMaxModuli];          // largest residue kept positive
+    uint32_t magic[kMaxModuli];       // u / m_t = see udiv() (Granlund-Montgomery)
+    int      shift[kMaxModuli];
+    uint32_t r31[kMaxModuli];         // 2^31 mod m_t
 };
 
 __constant__ CrtConst c_crt;
@@ -91,6 +94,11 @@ CrtConst make_crt(int n) {
         c.inv_m[t] = 1.0 / mt;
         c.c32[t] = (double)((uint64_t(1) << 32) % mt);
         c.half[t] = mt == 256 ? 127 : (mt - 1) / 2;
+        int l = 0;
+        while ((1 << l) < mt) ++l;  // ceil(log2 m_t)
+        c.shift[t] = l;
+        c.magic[t] = (uint32_t)(((uint64_t(1) << 32) * ((uint64_t(1) << l) - mt)) / mt + 1);
+        c.r31[t] = (uint32_t)((uint64_t(1) << 31) % mt);
     }
     for (int t = 0; t < n; ++t) {
         const u128 Mt = M / (u128)kModuli[t];
@@ -247,6 +255,25 @@ __global__ void convert(const double* __restrict__ X, int64_t sv, int64_t sl,
     }
 }
 
+// floor(u / m_t) for any 32-bit u (Granlund & Montgomery 1994, fig. 4.1).
+__device__ __forceinline__ uint32_t udiv(uint32_t u, int t) {
+    const uint32_t t1 = __umulhi(c_crt.magic[t], u);
+    return (t1 + ((u - t1) >> 1)) >> (c_crt.shift[t] - 1);
+}
+
+// x mod m_t in [0, m_t) for a signed 32-bit x, integer ALU only.
+__device__ __forceinline__ uint32_t imod(int32_t x, int t) {
+    const uint32_t u = (uint32_t)x ^ 0x80000000u;  // x + 2^31
+    const uint32_t m = c_crt.mod[t];
+    int32_t r = (int32_t)(u - udiv(u, t) * m) - (int32_t)c_crt.r31[t];
+    return (uint32_t)(r < 0 ? r + (int32_t)m : r);
+}
+
+// Exact conversion of a small unsigned int to double without I2F.
+__device__ __forceinline__ double u2d(uint32_t v) {
+    return __hiloint2double(0x43300000, (int)v) - 0x1p52;
+}
+
 __device__ __forceinline__ void two_sum(double a, double b, double& s, double& err) {
     s = a + b;
     const double bb = s - a;
@@ -277,7 +304,7 @@ __global__ void crt(const int32_t* __restrict__ C32, int64_t slab, int64_t mp,
 #pragma unroll
         for (int q = 0; q < NCH; ++q) s[q] = 0.0;
         for (int t = 0; t < n; ++t) {
-            const double c = mod_small((double)p[t * slab], c_crt.md[t], c_crt.inv_m[t]);
+            const double c = u2d(imod(p[t * slab], t));
 #pragma unroll
             for (int q = 0; q < NCH; ++q) s[q] = fma(c, c_crt.S[t][q], s[q]);  // exact: < 2^52
         }

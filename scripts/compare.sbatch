@@ -33,7 +33,7 @@ build/bench --preset "$PRESET" --moduli "$MODULI" --breakdown | tee "$OUT/bench.
 baseline-v0/build/bench --preset "$PRESET" --moduli 14 --no-native | tail -n +2 | tee -a "$OUT/bench.csv"
 
 # One Nsight Systems timeline at the HPL-like shape (3 timed calls).
-NSYS=$(ls -d "$NVHPC_ROOT"/profilers/Nsight_Systems/bin/nsys 2>/dev/null || true)
+NSYS=$(ls -d "$NVHPC_ROOT"/compilers/bin/nsys 2>/dev/null || true)
 if [[ "${NSYS_RUN:-1}" == 1 && -n "$NSYS" ]]; then
   "$NSYS" profile -t cuda,nvtx,cublas -o "$OUT/hpl-shape" --force-overwrite true \
     build/bench --shape 32768,32768,1024 --moduli 14 --reps 3 --warmup 1 > /dev/null
