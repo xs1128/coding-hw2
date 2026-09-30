@@ -32,11 +32,18 @@ build/test_ozdgemm | tee "$OUT/test.txt"
 build/bench --preset "$PRESET" --moduli "$MODULI" --breakdown | tee "$OUT/bench.csv"
 baseline-v0/build/bench --preset "$PRESET" --moduli 14 --no-native | tail -n +2 | tee -a "$OUT/bench.csv"
 
-# One Nsight Systems timeline at the HPL-like shape (3 timed calls).
+# Nsight Systems timelines: HPL-like shape (fixed 14 moduli) and a large
+# square with adaptive moduli (tol 0), 3 timed calls each.
 NSYS=$(ls -d "$NVHPC_ROOT"/compilers/bin/nsys 2>/dev/null || true)
 if [[ "${NSYS_RUN:-1}" == 1 && -n "$NSYS" ]]; then
   export TMPDIR=$PWD/$OUT/tmp && mkdir -p "$TMPDIR"   # compute nodes forbid /tmp/nvidia
-  "$NSYS" profile -t cuda,nvtx,cublas -o "$OUT/hpl-shape" --force-overwrite true \
-    build/bench --shape 32768,32768,1024 --moduli 14 --reps 3 --warmup 1 > /dev/null
-  "$NSYS" stats -r cuda_gpu_kern_sum,nvtx_sum -f csv -o "$OUT/hpl-shape" "$OUT/hpl-shape.nsys-rep" > /dev/null
+  prof() {  # name, bench args...
+    local name=$1; shift
+    "$NSYS" profile -t cuda,nvtx,cublas -o "$OUT/$name" --force-overwrite true \
+      build/bench "$@" --reps 3 --warmup 1 > /dev/null
+    "$NSYS" stats -r cuda_gpu_kern_sum,cuda_gpu_mem_time_sum -f csv -o "$OUT/$name" \
+      "$OUT/$name.nsys-rep" > /dev/null
+  }
+  prof nsys-hpl-shape --shape 32768,32768,1024 --moduli 14
+  prof nsys-square-adaptive --shape 16384,16384,16384 --moduli "" --tol 0
 fi
