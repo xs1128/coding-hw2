@@ -181,7 +181,8 @@ bench/bench.cu        end-to-end benchmark (CSV)
 hpl/                  cblas_dgemm shim, HPL patch and Make.ozd template
 scripts/              Slurm job scripts, HPL build, cost-model fit, projections
 results/<jobid>/      raw results (env.txt, test.txt, bench.csv, HPL logs)
-docs/                 reports
+REPORT.md             short report (start here)
+docs/                 detailed report
 third_party/          hpl-2.3.tar.gz from netlib (sha256 32c5c17d...)
 ```
 
