@@ -11,7 +11,7 @@
 #SBATCH --partition=dev
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=12
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:15:00
 #SBATCH --output=results/slurm-%j.out

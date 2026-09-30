@@ -38,7 +38,10 @@ Column-major, device pointers, same semantics as `cublasDgemm`. Backends:
 Fallbacks to native DGEMM (reported in `info.fallback_reason`):
 1 NaN/Inf in A or B; 2 `k == 0`, `alpha == 0`, `k > 131056`, or the converted A
 alone exceeds the workspace cap; 3 AUTO predicted native to be faster;
-4 adaptive tolerance not reachable with 16 moduli.
+4 adaptive tolerance not reachable with 16 moduli. A fallback returns native
+DGEMM's result, so with reason 4 and a `tol` tighter than native DGEMM itself
+achieves (e.g. `1e-15` on wide-exponent data) the result can still miss `tol`;
+the reason code tells the caller.
 
 ## Method (Ozaki scheme II)
 
@@ -48,7 +51,8 @@ alone exceeds the workspace cap; 3 AUTO predicted native to be faster;
 2. For pairwise coprime moduli `m_t ∈ {256, 255, 253, 251, 247, ...}` compute
    `A' mod m_t` and `B' mod m_t` as int8 (symmetric range).
 3. One INT8 GEMM (INT32 accumulate, exact) per modulus.
-4. Reduce each INT32 result mod `m_t` to uint8.
+4. Reduce each INT32 result mod `m_t` (integer magic-number division, fused
+   into the CRT kernel).
 5. CRT: `X = Σ c_t S_t mod M` with `S_t = M_t (M_t^-1 mod m_t)`. `S_t` is split
    into 40-bit chunks so every partial sum is exact in FP64; the quotient by `M`
    is found by rounding, and the signed result is summed with TwoSum.
@@ -107,6 +111,54 @@ benchmark CSVs by `scripts/fit_model.py` (least squares on relative error)
 and can be replaced with `ozd_set_cost_model`. Defaults come from job 441237:
 worst prediction error 17%, 63/63 decisions correct on that grid.
 
+## HPL integration
+
+netlib HPL 2.3 (tarball in `third_party/`, unmodified except a 3-line patch)
+is built with `-DHPL_CALL_CBLAS`, and a link-time shim (`hpl/ozd_shim.cu`)
+defines `cblas_dgemm`. Updates with `M, N >= 1024` and `K >= 128` go to the GPU
+through `ozd_dgemm`; smaller calls stay on the CPU BLAS (OpenBLAS). HPL keeps
+its matrix in host memory, so every offloaded update copies A, B and C over
+PCIe. The patch (`hpl/hpl-ozd.patch`) page-locks HPL's matrix so those copies
+run at full PCIe speed.
+
+```bash
+bash scripts/build_hpl.sh          # verifies the tarball, patches, builds build/xhpl
+N=50000 CONFIGS="native emu:14 autotol:0" sbatch scripts/hpl.sbatch
+python3 scripts/hpl_summary.py results/<jobid>   # (re)builds summary.csv
+```
+
+`CONFIGS` entries are `cpu | native | emu:<moduli> | auto:<moduli> |
+tol:<tol> | autotol:<tol>`, optionally followed by `,VAR=value` shim settings.
+Shim environment (the `HPL_OZD_` prefix is implied in `CONFIGS`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HPL_OZD_MODE` | `emu` | `cpu`, `native`, `emu` or `auto` |
+| `HPL_OZD_MODULI` / `HPL_OZD_TOL` | 14 / unset | fixed moduli, or adaptive tolerance |
+| `HPL_OZD_MIN` | 1024 | offload when `M, N >= MIN` and `K >= MIN/8` |
+| `HPL_OZD_PIPE` | 1 | stream C in column chunks, overlapping copy-in, GEMM and copy-out |
+| `HPL_OZD_CHUNK` | 2048 | chunk width in columns |
+| `HPL_OZD_REG` | 1 | page-lock HPL's matrix |
+| `HPL_OZD_SAFETY` | 1 | 0 skips the NaN/Inf check (diagnostic) |
+
+At exit the shim prints call counts, moduli used, fallbacks and the time in
+host-to-device copies, GPU GEMM, device-to-host copies and CPU BLAS, plus the
+wall time of the offloaded calls (with pipelining the first three overlap).
+
+Results (1 rank, NB = 1024):
+
+- **Accuracy** (job 461194, N = 20000): the scaled residual grows ~16x per
+  modulus removed; 11 moduli is the smallest count that passes (9.6 < 16).
+- **Serial offload** (job 461201, N = 60000, 16 CPUs): native 2,165 GFLOPS,
+  emu:14 2,111, emu:11 2,146, AUTO 2,167 (native on every call). GPU GEMM is
+  2.5 s of 66.5 s; the PCIe copies (21 s) and host work dominate.
+- **Pipelined offload** (jobs 461491, 462597, N = 50000, 12 CPUs): HPL time
+  drops 14% (+16.6% GFLOPS) for native; the offloaded calls take 8.0 s (native) and 8.2 s
+  (emu:14) instead of 13.8 / 14.8 s, i.e. the emulated GEMM hides behind the
+  copies. Residuals are identical to the serial path.
+- Total HPL time varies by up to ~20% between runs on shared nodes (host-side
+  work), so compare `shim_wall_s` in `summary.csv` within one job.
+
 ## Layout
 
 ```
@@ -114,8 +166,10 @@ include/ozdgemm.h     public API
 src/ozdgemm.cu        implementation
 tests/                correctness suite and double-double reference
 bench/bench.cu        end-to-end benchmark (CSV)
-scripts/              Slurm job scripts, cost-model fit
-results/<jobid>/      raw results (env.txt, test.txt, bench.csv)
+hpl/                  cblas_dgemm shim, HPL patch and Make.ozd template
+scripts/              Slurm job scripts, HPL build, cost-model fit, projections
+results/<jobid>/      raw results (env.txt, test.txt, bench.csv, HPL logs)
+docs/                 reports
 third_party/          hpl-2.3.tar.gz from netlib (sha256 32c5c17d...)
 ```
 
@@ -131,7 +185,15 @@ path) are called.
 - `k` is limited to 131056 on the emulated path (INT32 accumulator); larger `k` falls back.
 - The converted copy of op(A) must fit in the workspace cap; column blocks only split B/C.
 - The NaN/Inf check synchronizes the stream once per call (can be disabled);
-  adaptive mode always synchronizes once to choose the moduli count.
-- Adaptive mode costs one extra INT8 GEMM (~15-20% at large sizes) and is
-  conservative; wide-exponent inputs (`phi >= 2`) always fall back to native.
+  adaptive mode always synchronizes once to choose the moduli count. The flags
+  come back through mapped host memory, not a copy, so this sync does not
+  wait behind the caller's device-to-host copies on other streams.
+- Adaptive mode costs one extra INT8 GEMM pass (8% at 16384^3, ~20% at
+  k <= 2048) and is conservative; wide-exponent inputs (`phi >= 2`) always
+  fall back to native.
+- On an H200 native FP64 is strong (INT8 is only ~20x faster in practice), so
+  14-moduli emulation wins only for large k (about k >= 8192); the ceiling is
+  20/N x for N moduli. See `docs/report-1007.md`.
+- Running HPL through the shim cannot show a large gain on one H200: netlib
+  HPL keeps the matrix on the host, so PCIe copies and host work dominate.
 - The cost model is fitted on one H200; other GPUs need a refit.

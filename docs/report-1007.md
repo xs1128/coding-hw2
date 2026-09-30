@@ -78,10 +78,15 @@ is exact to about 2^−104.
   k = 16…16384, zero vectors, rows scaled by 2^300, and φ-distributed inputs
   with exponent range up to 2^±40.
 - **NaN/Inf inputs** fall back to native and give the IEEE result.
-- **Adaptive, `tol = 0`** (job 461134, 108 cases in `adaptive.csv`):
-  - The guarantee holds in every case; worst error / tol = 0.075.
+- **Adaptive sweep** (job 461134, repeated in 462595 with identical results;
+  108 cases in `adaptive.csv`):
+  - On the 69 emulated cases the guarantee holds; worst error / tol = 0.057.
   - Uniform data chooses 14 moduli at tol = DGEMM level, 11 at 1e-9, 8 at
     1e-6 and 6 at 1e-3.
+  - 9 cases ask for `tol = 1e-15` on wide-exponent (φ ≥ 1) data. That is
+    tighter than native DGEMM's own error there. The library refuses to emulate
+    (fallback reason 4) and returns native's result, whose error is up to 5×
+    tol. Neither path can meet such a tolerance; the reason code reports it.
 - **Blocking and determinism:** results are bitwise identical with and
   without column blocking, and across repeated runs.
 
@@ -134,6 +139,37 @@ the score by at most about 4%. netlib HPL keeps the matrix in host memory and
 moves it over PCIe on every update, so the result is limited by the host and
 PCIe, not by DGEMM.
 
+**Overlapping copies and GEMM** (jobs 461491, 462597; N = 50000 with 12 CPUs,
+the new per-GPU limit, so absolute times differ from the N = 60000 runs):
+- The shim now copies A and B first, then streams C in 2048-column chunks.
+- Copy-in, GEMM and copy-out run on three streams, so both PCIe directions
+  and the GPU work overlap.
+- For fixed moduli each output column depends only on its own column of B,
+  so the results are bitwise identical to the serial path. The residuals
+  match to every digit.
+
+| Config | Offloaded calls, serial (s) | Overlapped (s) | GPU GEMM busy (s) |
+|---|---:|---:|---:|
+| Native | 13.80 | 8.04 | 1.47 |
+| Emulation, 14 moduli, first version | 14.77 | 9.73 | 5.30 |
+| Emulation, 14 moduli, after the flag fix | — | **8.15** | **2.79** |
+
+HPL time dropped 14% for native (48.8 → 41.8 s, same node), i.e. +16.6% GFLOPS.
+
+The first overlapped version made emulated GEMMs 2.2× slower, and larger
+chunks (4096, 8192; job 462480) did not help. The cause was the library's
+NaN/Inf check:
+- It read an 8-byte flag back with `cudaMemcpyAsync`, which uses the
+  device-to-host copy engine.
+- That readback queued behind the previous chunk's copy-out (~30 ms), so each
+  emulated chunk stalled. Native calls have no readback.
+
+A one-thread kernel now stores the flags into mapped pinned memory instead.
+With it, emulated GEMM time matches a run with the check disabled (2.79 vs.
+2.78 s), and emulation hides behind the copies almost as well as native
+(8.15 vs. 8.04 s). The fix helps any caller that overlaps its own copies with
+`ozd_dgemm`.
+
 ## 5. Profiling (Nsight Systems, job 461398)
 
 **HPL shape 32768²×1024, 14 moduli, per call:**
@@ -181,10 +217,14 @@ that the implementation is slow.
 
 ## 6. Current problems
 
-1. **HPL cannot show a gain on this setup.** The GEMM is only ~4% of the
-   netlib HPL time on 1 rank (§4). A GPU-resident HPL would change that, but
-   it is a separate multi-thousand-line project; this is the approach of the
-   existing GEMMul8-based HPL we used only as a reference.
+1. **HPL cannot show a gain from emulation on this setup.**
+   - Serial offload: the GEMM is only ~4% of netlib HPL's time on 1 rank.
+   - With overlap: the GEMM hides behind the PCIe copies for both native and
+     emulated (§4).
+   - Either way, HPL's score does not depend on DGEMM speed here.
+   - A GPU-resident HPL would change that, but it is a separate
+     multi-thousand-line project. That is the approach of the existing
+     GEMMul8-based HPL we used only as a reference.
 2. **Native FP64 on the H200 is strong** (67 TFLOPS peak, 1/30 of INT8; see
    the ceiling in §5). Our model, which
    matches the measurements to within 5%, predicts the following on the
@@ -205,6 +245,15 @@ that the implementation is slow.
 4. **Small k and skinny shapes are 3–10× slower than native.** AUTO routes
    them to native, so users don't lose time, but emulation has nothing to
    offer there.
+5. **Measurement pitfalls we hit.**
+   - An A/B of v1 vs. v2 first showed v2 6–8% slower on small shapes (job
+     461435). Only the v2 run had timed native DGEMM just before, which heats
+     the GPU and slows the next runs by ~5%.
+   - Run the same way (job 461490), v1 and v2 match within 0.5%.
+     `scripts/abtest.sbatch` now runs both builds identically.
+   - Total HPL time also varies by up to ~20% between jobs on shared nodes
+     (host-side work). We therefore compare the shim's offload wall time
+     within one job.
 
 ## 7. Plan for the last week (10/8–10/13)
 
@@ -216,22 +265,21 @@ INT8 rate we actually achieve (not the peak), it does not pay off:
   With 11 moduli it would reach ~1.2×.
 - In HPL, where the GEMM is 4% of the time, that is < 1% of the score.
 
-It stays optional. The plan instead:
+It stays optional.
 
-1. **Overlap copies and compute in the HPL shim.**
-   - Split C into column chunks and run copy-in, GEMM and copy-out on three
-     streams.
-   - Today these steps run one after another and take 23.7 s of 66.5 s.
-   - Expected: ~10 s saved, ~15% on the HPL score, for native and emulated
-     alike.
-2. **Two-level estimate for the adaptive bound.** Quantize `|A|` in two
+**Done since the first draft:**
+- Copy/compute overlap in the HPL shim (§4).
+- The mapped-memory flag fix (§4).
+- The v1 vs. v2 A/B: no regression (§6).
+
+**Remaining:**
+1. **Two-level estimate for the adaptive bound.** Quantize `|A|` in two
    exponent bands so that φ ≥ 2 inputs get a finite R. This recovers the
    `adapt-phi*` cases without weakening the guarantee.
-3. **Same-node A/B of v1 vs. v2** to settle two shapes that looked ~8% slower
-   in v2 (4096³ and 8192²×1024; the runs were on different nodes).
-4. **Final report and README.** Add HPL build/run steps, the ceiling analysis,
-   the failure cases, and the applicable scope (large k, and GPUs with weak
-   FP64).
+2. **HPL with fewer moduli under overlap.** Check whether 11–12 moduli (the
+   HPL-passing minimum) change anything once the GEMM hides behind the copies.
+3. **Final report and README.** Add the failure cases, the applicable scope
+   (large k, and GPUs with weak FP64) and the profiling evidence.
 
 **Questions for the TA:**
 - Is cuBLAS's INT8 GEMM acceptable as a building block? Our own v0 serves as
