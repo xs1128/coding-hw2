@@ -83,6 +83,10 @@ is exact to about 2^−104.
   - On the 69 emulated cases the guarantee holds; worst error / tol = 0.057.
   - Uniform data chooses 14 moduli at tol = DGEMM level, 11 at 1e-9, 8 at
     1e-6 and 6 at 1e-3.
+  - **Level-2 bound** (job 462933): φ=2 cases that fell back now run
+    emulated at tol 1e-12 to 1e-3. The sweep has 79 of 108 cases emulated
+    (was 69), and the worst error / tol is unchanged (0.057). New tests cover
+    level 2 with column blocking.
   - 9 cases ask for `tol = 1e-15` on wide-exponent (φ ≥ 1) data. That is
     tighter than native DGEMM's own error there. The library refuses to emulate
     (fallback reason 4) and returns native's result, whose error is up to 5×
@@ -235,13 +239,27 @@ that the implementation is slow.
    This comes from `scripts/project_gpu.py`, which rescales the fitted
    model to the datasheet peaks. It is a projection, not a measurement.
    Most of our "emulation loses" results are specific to the H200.
-3. **The adaptive bound is too pessimistic for wide exponent ranges.**
-   - The `|A||B|` estimate uses 7-bit quantization, which rounds small
-     entries to 0.
-   - For φ ≥ 2 data this makes R unbounded, so the call falls back to
-     native even when 14 moduli would have been enough (test cases
-     `adapt-phi2`/`phi4`).
-   - The fallback is safe, but it gives up performance.
+3. **The adaptive bound was too pessimistic for wide exponent ranges;
+   fixed for φ ≈ 2.**
+   - The level-1 `|A||B|` estimate quantizes to 7 bits and rounds some
+     entries to 0. For φ ≥ 2 data every tolerance fell back to native.
+   - Before building a fix we computed the exact ratio offline (numpy,
+     1024³):
+
+     | Data | Exact max log2 R | Level 1 | Two-band (level 2) |
+     |---|---:|---|---:|
+     | φ=2 | 12.4 | 0.8% zero bounds → fallback | 15 |
+     | φ=4 | 28.0 | 69% zero bounds | 0.4% zero bounds |
+
+   - The first draft of this report claimed 14 moduli "would have been
+     enough" at `tol = 0`. That was wrong: even the exact R needs more than
+     16 moduli there, so falling back is correct.
+   - The real loss was φ=2 at looser tolerances. Level 2 (a two-band bound,
+     run only when level 1 fails) recovers it: 11/13/15 moduli at
+     1e-6/1e-8/1e-10.
+   - Level 2 costs four INT8 GEMMs (~29 ms at 16384³). On the H200 it pays
+     off only at large k and loose tolerance (1.15× native at 16384³,
+     tol 1e-6). φ=4 still falls back.
 4. **Small k and skinny shapes are 3–10× slower than native.** AUTO routes
    them to native, so users don't lose time, but emulation has nothing to
    offer there.
@@ -271,14 +289,12 @@ It stays optional.
 - Copy/compute overlap in the HPL shim (§4).
 - The mapped-memory flag fix (§4).
 - The v1 vs. v2 A/B: no regression (§6).
+- The two-band (level-2) adaptive bound (§3, §6).
 
 **Remaining:**
-1. **Two-level estimate for the adaptive bound.** Quantize `|A|` in two
-   exponent bands so that φ ≥ 2 inputs get a finite R. This recovers the
-   `adapt-phi*` cases without weakening the guarantee.
-2. **HPL with fewer moduli under overlap.** Check whether 11–12 moduli (the
+1. **HPL with fewer moduli under overlap.** Check whether 11–12 moduli (the
    HPL-passing minimum) change anything once the GEMM hides behind the copies.
-3. **Final report and README.** Add the failure cases, the applicable scope
+2. **Final report and README.** Add the failure cases, the applicable scope
    (large k, and GPUs with weak FP64) and the profiling evidence.
 
 **Questions for the TA:**

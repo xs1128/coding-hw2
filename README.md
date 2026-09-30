@@ -91,15 +91,25 @@ above this needs `4·sqrt(k)·2^-P·R_ij <= tol` with
   `floor(|a|·2^(6-amax_i))` (values 0..127, never above the true scaled |a|).
 - A kernel takes the max over entries of `log2` of the resulting upper bound on
   `R_ij`; the host picks the fewest moduli with `P >= that + 2 + log2(sqrt k) - log2 tol`.
-  If 16 are not enough, or some entry has a zero lower bound, the call falls
-  back to native DGEMM.
+- **Level 2.** For wide exponent ranges the 7-bit floor rounds some lower
+  bounds to 0 (or leaves them too loose), and level 1 certifies no count. Then
+  `s = |a|·2^(6-amax)` is split into `h = floor(s)` and `l = floor((s-h)·128)`
+  (both exact, `s >= h + l/128`), and four INT8 GEMMs give
+  `|A||B| >= hh + (hl+lh)/128 + ll/16384`, summed in 64 bits. Level 2 runs
+  only when level 1 fails; AUTO skips it when native is predicted faster
+  even with the fewest moduli. `info.estimate_level` says which level ran.
+- If 16 moduli are still not enough, or some entry still has a zero lower
+  bound, the call falls back to native DGEMM (reason 4).
 
-Sweep (job 461134, 1024x1024, k in {256, 1024, 4096}): the guarantee held in
-every case (worst error/tol 0.06). HPL-like uniform data needs 14 moduli at
-`tol = 0`, 11 at 1e-9, 8 at 1e-6. The bound is conservative (errors are
-~1-2% of tol, i.e. about 1-2 moduli more than strictly needed), and for
-`phi >= 2` data the 7-bit floor quantization zeroes the lower bound for some
-entries, so those calls always run natively (safe, but no speedup).
+Sweep (jobs 461134, 462933; 1024x1024, k in {256, 1024, 4096}): the
+guarantee held in every emulated case (worst error/tol 0.057). HPL-like
+uniform data needs 14 moduli at `tol = 0`, 11 at 1e-9, 8 at 1e-6, all from
+level 1. The bound is conservative (errors are ~1-2% of tol, about 1-2
+moduli more than strictly needed). `phi = 2` data now runs emulated through
+level 2 at tol 1e-12 to 1e-3 (16 down to 9 moduli); at `tol = 0` it still
+falls back, correctly: even the exact ratio (max log2 R = 12.4, computed
+offline) would need more than 16 moduli. `phi = 4` data falls back at every
+tol (level 2 still has zero bounds).
 
 ## Dispatcher (`OZD_BACKEND_AUTO`)
 
@@ -189,8 +199,10 @@ path) are called.
   come back through mapped host memory, not a copy, so this sync does not
   wait behind the caller's device-to-host copies on other streams.
 - Adaptive mode costs one extra INT8 GEMM pass (8% at 16384^3, ~20% at
-  k <= 2048) and is conservative; wide-exponent inputs (`phi >= 2`) always
-  fall back to native.
+  k <= 2048) and is conservative. The level-2 pass adds four more (~29 ms at
+  16384^3, ~35 ms at 32768^2x1024), so on an H200 wide-exponent data gains
+  only at large k and loose tol (phi=2, 16384^3, tol 1e-6: 1.15x native);
+  `phi >= 4` data always falls back.
 - On an H200 native FP64 is strong (INT8 is only ~20x faster in practice), so
   14-moduli emulation wins only for large k (about k >= 8192); the ceiling is
   20/N x for N moduli. See `docs/report-1007.md`.
