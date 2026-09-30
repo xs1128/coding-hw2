@@ -174,6 +174,23 @@ With it, emulated GEMM time matches a run with the check disabled (2.79 vs.
 (8.15 vs. 8.04 s). The fix helps any caller that overlaps its own copies with
 `ozd_dgemm`.
 
+**Fewer moduli under overlap** (job 463015, N = 50000, same node):
+
+| Config | GPU GEMM busy (s) | Offloaded wall (s) | HPL GFLOPS | Residual |
+|---|---:|---:|---:|---|
+| Native | 1.46 | 8.38 | 1,954 | 2.1e-3 |
+| Emulation, 14 moduli | 2.79 | 8.74 | 2,037 | 2.4e-3 |
+| Emulation, 12 moduli | 2.36 | 8.60 | 2,026 | 0.40 |
+| Emulation, 11 moduli | 2.26 | 8.74 | 2,031 | 6.4 |
+
+- Fewer moduli shorten the GPU GEMM (2.79 → 2.26 s), but the offloaded
+  wall time stays at 8.4–8.7 s. The host-to-device copies (~8 s) set the
+  pace.
+- The 4% HPL gap in favor of the emulated runs is host-side noise, not a
+  gain. Native reached 41.8 s in job 461491 with the same GPU-side time.
+- **Conclusion:** once overlapped, HPL on this setup is PCIe-bound. The
+  moduli count only changes the residual (all four pass).
+
 ## 5. Profiling (Nsight Systems, job 461398)
 
 **HPL shape 32768²×1024, 14 moduli, per call:**
@@ -290,11 +307,10 @@ It stays optional.
 - The mapped-memory flag fix (§4).
 - The v1 vs. v2 A/B: no regression (§6).
 - The two-band (level-2) adaptive bound (§3, §6).
+- HPL with 11–12 moduli under overlap: no change, PCIe-bound (§4).
 
 **Remaining:**
-1. **HPL with fewer moduli under overlap.** Check whether 11–12 moduli (the
-   HPL-passing minimum) change anything once the GEMM hides behind the copies.
-2. **Final report and README.** Add the failure cases, the applicable scope
+1. **Final report and README.** Add the failure cases, the applicable scope
    (large k, and GPUs with weak FP64) and the profiling evidence.
 
 **Questions for the TA:**

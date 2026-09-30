@@ -165,7 +165,9 @@ Results (1 rank, NB = 1024):
 - **Pipelined offload** (jobs 461491, 462597, N = 50000, 12 CPUs): HPL time
   drops 14% (+16.6% GFLOPS) for native; the offloaded calls take 8.0 s (native) and 8.2 s
   (emu:14) instead of 13.8 / 14.8 s, i.e. the emulated GEMM hides behind the
-  copies. Residuals are identical to the serial path.
+  copies. Residuals are identical to the serial path. With 12 or 11 moduli
+  (job 463015) the GPU GEMM shrinks (2.79 -> 2.26 s) but the offloaded time
+  does not (8.6-8.7 s): the host-to-device copies set the pace.
 - Total HPL time varies by up to ~20% between runs on shared nodes (host-side
   work), so compare `shim_wall_s` in `summary.csv` within one job.
 
