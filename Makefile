@@ -31,10 +31,17 @@ $(BUILD)/test_ozdgemm: tests/test_ozdgemm.cu tests/common.cuh $(LIB)
 $(BUILD)/bench: bench/bench.cu tests/common.cuh $(LIB)
 	$(NVCC) $(NVFLAGS) $< $(LIB) $(LDLIBS) -o $@
 
+# DGEMM hook for netlib HPL (see scripts/build_hpl.sh)
+$(BUILD)/libozdhpl.a: hpl/ozd_shim.cu include/ozdgemm.h | $(BUILD)
+	$(NVCC) $(NVFLAGS) -c $< -o $(BUILD)/ozd_shim.o
+	ar rcs $@ $(BUILD)/ozd_shim.o
+
+hpl-shim: $(LIB) $(BUILD)/libozdhpl.a
+
 test: $(BUILD)/test_ozdgemm
 	$(BUILD)/test_ozdgemm
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean
+.PHONY: all test clean hpl-shim

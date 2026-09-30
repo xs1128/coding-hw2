@@ -1,0 +1,58 @@
+--- a/testing/ptest/HPL_pdtest.c	2026-09-30 14:26:30.241385887 +0800
++++ b/testing/ptest/HPL_pdtest.c	2026-09-30 14:26:30.265386095 +0800
+@@ -49,6 +49,17 @@
+  */
+ #include "hpl.h"
+ 
++#ifdef HPL_OZD
++#define HPL_OZD_UNREG( p ) HPL_ozd_unregister( p )
++#else
++#define HPL_OZD_UNREG( p )
++#endif
++#ifdef HPL_OZD
++/* ozd_shim.cu: page-lock the matrix so GPU offload copies run at full PCIe rate */
++void HPL_ozd_register( void *, size_t );
++void HPL_ozd_unregister( void * );
++#endif
++
+ #ifdef STDC_HEADERS
+ void HPL_pdtest
+ (
+@@ -178,6 +189,10 @@
+       if (vptr) free(vptr);
+       return;
+    }
++#ifdef HPL_OZD
++   HPL_ozd_register( vptr, ( (size_t)(ALGO->align) +
++                             (size_t)(mat.ld+1) * (size_t)(mat.nq) ) * sizeof(double) );
++#endif
+ /*
+  * generate matrix and right-hand-side, [ A | b ] which is N by N+1.
+  */
+@@ -321,7 +336,7 @@
+  * Quick return, if I am not interested in checking the computations
+  */
+    if( TEST->thrsh <= HPL_rzero )
+-   { (TEST->kpass)++; if( vptr ) free( vptr ); return; }
++   { (TEST->kpass)++; if( vptr ) { HPL_OZD_UNREG( vptr ); free( vptr ); } return; }
+ /*
+  * Check info returned by solve
+  */
+@@ -331,7 +346,7 @@
+          HPL_pwarn( TEST->outfp, __LINE__, "HPL_pdtest", "%s %d, %s", 
+                     "Error code returned by solve is", mat.info, "skip" );
+       (TEST->kskip)++;
+-      if( vptr ) free( vptr ); return;
++      if( vptr ) { HPL_OZD_UNREG( vptr ); free( vptr ); } return;
+    }
+ /*
+  * Check computation, re-generate [ A | b ], compute norm 1 and inf of A and x,
+@@ -431,7 +446,7 @@
+          "||b||_oo . . . . . . . . . . . . . . . . . . . = ", BnormI );
+       }
+    }
+-   if( vptr ) free( vptr );
++   if( vptr ) { HPL_OZD_UNREG( vptr ); free( vptr ); }
+ /*
+  * End of HPL_pdtest
+  */
