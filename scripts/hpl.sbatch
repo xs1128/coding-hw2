@@ -33,7 +33,6 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-16}
   lscpu | grep -E "Model name|^CPU\(s\)"
 } | tee "$OUT/env.txt"
 
-echo "config,N,NB,time_s,gflops,residual,passed,gpu_calls,emulated,moduli,h2d_s,gemm_s,d2h_s,cpu_blas_s" > "$OUT/summary.csv"
 for cfg in $CONFIGS; do
   mode=${cfg%%:*}; arg=${cfg#*:}; [[ "$arg" == "$cfg" ]] && arg=""
   unset HPL_OZD_MODULI HPL_OZD_TOL
@@ -82,12 +81,5 @@ DAT
   log=$OUT/hpl-${cfg//:/-}.out
   "$OPAL_PREFIX/bin/mpirun" -np 1 --bind-to none "$REPO/build/xhpl" > "$log" 2>&1 || echo "xhpl exited $?" >> "$log"
   cd "$REPO"
-  # T/V line: WRxxxxx N NB P Q Time Gflops
-  read -r t gf < <(awk '/^WR/ {print $6, $7}' "$log" | tail -1) || true
-  res=$(awk -F'=' '/\|\|Ax-b\|\|_oo/ {split($2,a," "); print a[1]}' "$log" | tail -1)
-  pass=$(grep -c "PASSED" "$log" || true)
-  stats=$(awk '/^OZD_HPL mode/ {for(i=1;i<=NF;i++) if($i ~ /^gpu=/) g=substr($i,5); if (match($0,/emulated [0-9]+/)) e=substr($0,RSTART+9,RLENGTH-9); if (match($0,/moduli [0-9]+\.\.[0-9]+/)) m=substr($0,RSTART+7,RLENGTH-7)}
-                /^OZD_HPL gflop/ {for(i=1;i<=NF;i++){ if($i ~ /^h2d=/) h=substr($i,5); if($i ~ /^gemm=/) gm=substr($i,6); if($i ~ /^d2h=/) d=substr($i,5); if($i ~ /^cpu_blas=/) c=substr($i,10)}}
-                END {print g","e","m","h","gm","d","c}' "$log")
-  echo "$cfg,$N,$NB,${t:-},${gf:-},${res:-},$pass,$stats" | tee -a "$OUT/summary.csv"
 done
+python3 "$REPO/scripts/hpl_summary.py" "$OUT"
