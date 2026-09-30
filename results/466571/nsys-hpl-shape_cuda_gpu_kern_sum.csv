@@ -1,0 +1,8 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+54.0,307174654,8,38396831.8,39565982.5,35582261,39962943,1920796.3,sm90_xmma_gemm_f64f64_f64f64_f64_nn_n_tilesize64x128x16_stage3_warpsize2x2x1_tensor16x8x8_execute_kernel__5x_cublas
+24.9,141809459,16,8863091.2,9544551.0,6325999,10343513,1475050.8,sm90_xmma_gemm_i8i32_i8i32_i32_tn_n_tilesize64x128x128_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+20.0,113818159,16,7113634.9,7800611.0,4858571,8009395,1309418.4,"void <unnamed>::crt<(int)3>(const int *, long, long, long, long, long, const <unnamed>::VecExp *, const <unnamed>::VecExp *, double, double, double *, long)"
+1.0,5535183,20,276759.2,190705.0,119649,725025,213348.5,"void <unnamed>::convert<(int)0>(const double *, long, long, long, long, long, long, const <unnamed>::VecExp *, signed char *, long)"
+0.1,580994,4,145248.5,143952.5,141056,152033,4778.9,"<unnamed>::scale_contig(const double *, long, long, <unnamed>::VecExp *, int *)"
+0.1,418657,4,104664.3,103392.5,102016,109856,3522.3,"<unnamed>::scale_strided(const double *, long, long, long, <unnamed>::VecExp *, int *)"
+0.0,8896,4,2224.0,2064.0,1984,2784,375.5,"<unnamed>::publish_flags(const int *, int *)"

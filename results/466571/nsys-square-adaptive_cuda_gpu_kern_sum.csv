@@ -1,0 +1,10 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+71.4,1263943513,8,157992939.1,157355084.0,154434596,163818064,2750627.9,sm90_xmma_gemm_f64f64_f64f64_f64_nn_n_tilesize64x128x16_stage3_warpsize2x2x1_tensor16x8x8_execute_kernel__5x_cublas
+22.0,390484274,120,3254035.6,3286455.0,2366853,4801130,642273.7,sm90_xmma_gemm_i8i32_i8i32_i32_tn_n_tilesize128x256x128_warpgroupsize2x1x1_execute_segment_k_off_kernel__5x_cublas
+3.0,52473421,12,4372785.1,3764488.5,2608134,7601168,1679948.8,"void <unnamed>::convert<(int)0>(const double *, long, long, long, long, long, long, const <unnamed>::VecExp *, signed char *, long)"
+2.0,35871691,8,4483961.4,4554633.5,3277703,6457230,1156448.9,"void <unnamed>::crt<(int)3>(const int *, long, long, long, long, long, const <unnamed>::VecExp *, const <unnamed>::VecExp *, double, double, double *, long)"
+0.8,14109342,8,1763667.8,1762307.5,1664356,1963748,106023.1,"void <unnamed>::ratio_bound<(int)1>(const int *, long, long, long, long, long, const <unnamed>::VecExp *, const <unnamed>::VecExp *, int *)"
+0.4,7925521,12,660460.1,568913.0,359521,1155523,273902.6,"void <unnamed>::convert<(int)1>(const double *, long, long, long, long, long, long, const <unnamed>::VecExp *, signed char *, long)"
+0.2,3238600,4,809650.0,781506.0,739330,936258,86945.6,"<unnamed>::scale_contig(const double *, long, long, <unnamed>::VecExp *, int *)"
+0.2,3150503,4,787625.8,759938.0,717761,912866,86175.9,"<unnamed>::scale_strided(const double *, long, long, long, <unnamed>::VecExp *, int *)"
+0.0,9248,4,2312.0,2208.0,2080,2752,309.6,"<unnamed>::publish_flags(const int *, int *)"
