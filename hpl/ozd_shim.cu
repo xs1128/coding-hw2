@@ -16,6 +16,8 @@
 //   HPL_OZD_PIPE    1 = split C into column chunks and overlap host->device
 //                   copy, GEMM and device->host copy on three streams (default 1)
 //   HPL_OZD_CHUNK   chunk width in columns for HPL_OZD_PIPE (default 2048)
+//   HPL_OZD_SAFETY  0 = skip ozdgemm's non-finite input check (diagnostic;
+//                   default 1)
 // At exit, rank-local statistics are printed to stderr.
 #include "ozdgemm.h"
 
@@ -83,6 +85,7 @@ struct Shim {
         ozd_set_max_workspace(h, size_t(24) << 30);
         ozd_set_backend(h, mode == NATIVE ? OZD_BACKEND_NATIVE
                            : mode == AUTO ? OZD_BACKEND_AUTO : OZD_BACKEND_EMU);
+        if (const char* v = std::getenv("HPL_OZD_SAFETY")) ozd_set_safety_check(h, std::atoi(v) != 0);
         if (const char* v = std::getenv("HPL_OZD_TOL")) ozd_set_accuracy(h, std::atof(v));
         else ozd_set_moduli(h, std::getenv("HPL_OZD_MODULI") ? std::atoi(std::getenv("HPL_OZD_MODULI")) : 14);
         std::atexit([] { report(); });

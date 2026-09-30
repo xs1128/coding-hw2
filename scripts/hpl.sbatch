@@ -39,7 +39,7 @@ for cfg in $CONFIGS; do
   IFS=, read -r -a parts <<< "$cfg"
   base=${parts[0]}
   mode=${base%%:*}; arg=${base#*:}; [[ "$arg" == "$base" ]] && arg=""
-  unset HPL_OZD_MODULI HPL_OZD_TOL HPL_OZD_PIPE HPL_OZD_CHUNK
+  unset HPL_OZD_MODULI HPL_OZD_TOL HPL_OZD_PIPE HPL_OZD_CHUNK HPL_OZD_SAFETY
   for kv in "${parts[@]:1}"; do export "HPL_OZD_$kv"; done
   case $mode in
     cpu|native) export HPL_OZD_MODE=$mode ;;

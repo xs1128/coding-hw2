@@ -388,6 +388,13 @@ __global__ void ratio_bound(const int32_t* __restrict__ G, int64_t mp, int64_t m
     if (threadIdx.x % 32 == 0) atomicMax(out, best);
 }
 
+// Copies the two flags to mapped host memory with plain stores. A
+// cudaMemcpyAsync would go through the device-to-host copy engine and queue
+// behind any large copy the caller has in flight on another stream.
+__global__ void publish_flags(const int* __restrict__ flag, int* __restrict__ host) {
+    if (threadIdx.x < 2) host[threadIdx.x] = flag[threadIdx.x];
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------- handle
@@ -405,7 +412,8 @@ struct ozd_context {
     bool              profiling = false;
     void*             ws = nullptr;
     size_t            ws_bytes = 0;
-    int*              h_flag = nullptr;  // pinned: [0] non-finite flag, [1] log2 ratio bound
+    int*              h_flag = nullptr;  // mapped pinned: [0] non-finite flag, [1] log2 ratio bound
+    int*              d_hflag = nullptr; // device alias of h_flag
     cudaEvent_t       ev[6] = {};
     ozd_info_t        info{};
 };
@@ -581,7 +589,8 @@ ozd_status_t ozd_create(ozd_handle_t* out, cudaStream_t stream) {
     h->model = kDefaultModel;
     if (cublasCreate(&h->cublas) != CUBLAS_STATUS_SUCCESS) { delete h; return OZD_ERR_CUBLAS; }
     cublasSetStream(h->cublas, stream);
-    OZD_CUDA(cudaMallocHost(&h->h_flag, 2 * sizeof(int)));
+    OZD_CUDA(cudaHostAlloc(&h->h_flag, 2 * sizeof(int), cudaHostAllocMapped));
+    OZD_CUDA(cudaHostGetDevicePointer(&h->d_hflag, h->h_flag, 0));
     for (auto& e : h->ev) OZD_CUDA(cudaEventCreate(&e));
     *out = h;
     return OZD_OK;
@@ -737,7 +746,8 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
     }
 
     if (h->safety || adaptive) {
-        OZD_CUDA(cudaMemcpyAsync(h->h_flag, flag, 2 * sizeof(int), cudaMemcpyDeviceToHost, st));
+        publish_flags<<<1, 32, 0, st>>>(flag, h->d_hflag);
+        OZD_CUDA(cudaGetLastError());
         OZD_CUDA(cudaStreamSynchronize(st));
         if (h->h_flag[0]) return fallback(OZD_FALLBACK_NONFINITE);
     }
