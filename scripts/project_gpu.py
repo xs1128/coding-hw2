@@ -4,7 +4,7 @@
     python3 scripts/project_gpu.py
 
 This is a paper estimate, not a measurement. Each term of the fitted model
-(src/ozdgemm.cu, kDefaultModel, job 441237) is scaled by the ratio of the
+(src/ozdgemm.cu, kDefaultModel, job 466503) is scaled by the ratio of the
 target's datasheet peak to the H200's: INT8 tensor throughput for the GEMM
 term, DRAM bandwidth for the convert/CRT/output terms, FP64 for native.
 Launch overheads are kept as measured.
@@ -15,8 +15,8 @@ TARGETS = {
     "H200 (measured model)": H200,
     "RTX 5090": dict(int8=838, bw=1.792, fp64=1.637),
 }
-MODEL = dict(native_overhead_ms=0.01265, native_tflops=56.66, emu_overhead_ms=0.05899,
-             int8_tops=1182.0, convert_gbs=949.4, gemm_out_gbs=1637.0)
+MODEL = dict(native_overhead_ms=0.01159, native_tflops=55.92, emu_overhead_ms=0.0587,
+             int8_tops=1369.0, convert_gbs=909.4, gemm_out_gbs=1530.0)
 SHAPES = [(16384, 16384, 16384), (32768, 32768, 1024), (8192, 8192, 8192), (4096, 4096, 4096)]
 MODULI = [14, 11, 8]
 

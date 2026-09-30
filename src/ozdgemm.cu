@@ -458,14 +458,14 @@ namespace {
         }                                                                        \
     } while (0)
 
-// Defaults fitted on an H200 from job 441237 (scripts/fit_model.py): worst
-// prediction error 17%, 63/63 dispatch decisions correct on that grid. The
+// Defaults fitted on an H200 from job 466503 (scripts/fit_model.py): worst
+// prediction error 16%, 63/63 dispatch decisions correct on that grid. The
 // CRT read traffic moves in lockstep with the INT32 GEMM output, so the fit
 // folds it into gemm_out_gbs and crt_gbs is effectively infinite.
 constexpr ozd_cost_model_t kDefaultModel = {
-    /*native_overhead_ms*/ 0.01265, /*native_tflops*/ 56.66,
-    /*emu_overhead_ms*/ 0.05899, /*int8_tops*/ 1182.0, /*convert_gbs*/ 949.4,
-    /*gemm_out_gbs*/ 1637.0, /*crt_gbs*/ 1e30,
+    /*native_overhead_ms*/ 0.01159, /*native_tflops*/ 55.92,
+    /*emu_overhead_ms*/ 0.0587, /*int8_tops*/ 1369.0, /*convert_gbs*/ 909.4,
+    /*gemm_out_gbs*/ 1530.0, /*crt_gbs*/ 1e30,
 };
 
 // Scaling bits P for each moduli count (index = count).
