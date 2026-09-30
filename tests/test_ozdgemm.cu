@@ -166,6 +166,7 @@ int dispatch_checks() {
     };
     int fails = 0;
     ozd_set_backend(g_h, OZD_BACKEND_AUTO);
+    ozd_set_max_workspace(g_h, size_t(4) << 30);  // earlier cases may have lowered it
     for (const auto& d : ds) {
         double *A, *B, *C;
         CK(cudaMalloc(&A, (size_t)d.m * d.k * 8));
@@ -179,11 +180,13 @@ int dispatch_checks() {
         ozd_info_t info;
         ozd_get_info(g_h, &info);
         const bool ok = info.path == d.expect_path &&
+                        (d.expect_path == 0 || info.fallback_reason == OZD_FALLBACK_NONE) &&
                         (d.expect_path == 1 || info.fallback_reason == OZD_FALLBACK_DISPATCH);
         fails += !ok;
         std::printf("%-18s %5ld %5ld %6ld pred native %8.3f ms emu %8.3f ms -> %s %s\n", d.name,
                     (long)d.m, (long)d.n, (long)d.k, info.pred_native_ms, info.pred_emu_ms,
                     info.path ? "emu" : "native", ok ? "PASS" : "FAIL");
+        if (!ok) std::printf("  (fallback reason %d)\n", info.fallback_reason);
         cudaFree(A); cudaFree(B); cudaFree(C);
     }
     ozd_set_backend(g_h, OZD_BACKEND_EMU);
