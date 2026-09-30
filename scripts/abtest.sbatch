@@ -3,6 +3,9 @@
 # or power drift hits both equally. Needs the old build in a worktree:
 #   git worktree add baseline-v1 05007ab && make -C baseline-v1 build/bench
 #   OLD=baseline-v1 sbatch scripts/abtest.sbatch
+#   ARGS="--moduli 14 --reps 10 --warmup 3 --breakdown" sbatch scripts/abtest.sbatch
+# Both builds run under identical conditions (no native DGEMM in between:
+# a native run heats the GPU and slows the emulated run after it by ~5%).
 #SBATCH --account=ACD110018
 #SBATCH --job-name=ozd-ab
 #SBATCH --partition=dev
@@ -21,10 +24,11 @@ mkdir -p "$OUT"
 OLD=${OLD:-baseline-v1}
 ROUNDS=${ROUNDS:-3}
 SHAPES=${SHAPES:-"4096,4096,4096 8192,8192,1024 16384,16384,1024 32768,32768,1024 16384,16384,16384"}
+ARGS=${ARGS:-"--moduli 14 --reps 20 --warmup 3"}
 
 {
   echo "host=$(hostname) date=$(date -Is) commit=$(git rev-parse --short HEAD) dirty=$(git status --porcelain -uno | wc -l)"
-  echo "old=$OLD@$(git -C "$OLD" rev-parse --short HEAD) rounds=$ROUNDS"
+  echo "old=$OLD@$(git -C "$OLD" rev-parse --short HEAD) rounds=$ROUNDS args=$ARGS"
   nvidia-smi --query-gpu=name,driver_version,clocks.max.sm,power.limit --format=csv,noheader
 } | tee "$OUT/env.txt"
 
@@ -34,9 +38,8 @@ build/bench "${args[@]}" --reps 1 --warmup 1 --no-native > /dev/null   # warm th
 first=1
 for r in $(seq "$ROUNDS"); do
   for bin in "$OLD/build/bench" build/bench; do
-    # native only with the current build, for a drift reference
-    extra=(--no-native); [[ $bin == build/bench ]] && extra=()
-    "$bin" "${args[@]}" --moduli 14 --reps 20 --warmup 3 "${extra[@]}" |
+    # shellcheck disable=SC2086
+    "$bin" "${args[@]}" $ARGS --no-native |
       awk -v r="$r" -v first="$first" 'NR == 1 { if (first) print "round," $0; next } { print r "," $0 }' \
       >> "$OUT/ab.csv"
     first=0
