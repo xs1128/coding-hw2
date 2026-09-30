@@ -5,3 +5,4 @@ third_party/hpl-2.3/
 *.sqlite
 results/*/tmp/
 baseline-v0/
+results/*/run-*/
