@@ -7,8 +7,13 @@
 // This checks the implementation against the method's own guarantee. We also
 // print the componentwise error of native DGEMM for comparison.
 //
-// Usage: test_ozdgemm            run the suite, exit 1 on any failure
-//        test_ozdgemm --sweep    CSV of error vs. moduli (informational)
+// Adaptive cases (ozd_set_accuracy) must additionally meet the requested
+// guarantee |C - C_ref| <= tol * |A||B| + 4u * (...), or report that the
+// tolerance is unreachable and fall back to native DGEMM.
+//
+// Usage: test_ozdgemm              run the suite, exit 1 on any failure
+//        test_ozdgemm --sweep      CSV of error vs. moduli (informational)
+//        test_ozdgemm --adaptive   CSV of moduli chosen vs. tolerance
 #include "common.cuh"
 #include "ozdgemm.h"
 
@@ -26,11 +31,12 @@ struct Case {
     int moduli;
     int64_t pad = 0;           // extra leading-dimension padding
     size_t max_ws = 0;         // 0 = default
+    double tol = -1;           // >= 0: adaptive moduli with this tolerance (0 = DGEMM-level)
 };
 
 struct Result {
-    double err_nw = 0, err_cw = 0, nat_cw = 0, bound_ratio = 0;
-    int path = -1, reason = 0, blocks = 0;
+    double err_nw = 0, err_cw = 0, nat_cw = 0, bound_ratio = 0, tol_ratio = 0;
+    int path = -1, reason = 0, blocks = 0, moduli = 0, log2_ratio = 0;
     bool nan_ok = true;
 };
 
@@ -76,7 +82,8 @@ Result run(const Case& c, std::vector<double>* out_C = nullptr) {
     CK(cudaMemcpy(dN, dC0, sC, cudaMemcpyDeviceToDevice));
 
     const auto oa = c.ta ? OZD_OP_T : OZD_OP_N, ob = c.tb ? OZD_OP_T : OZD_OP_N;
-    ozd_set_moduli(g_h, c.moduli);
+    if (c.tol >= 0) ozd_set_accuracy(g_h, c.tol);
+    else ozd_set_moduli(g_h, c.moduli);
     ozd_set_max_workspace(g_h, c.max_ws ? c.max_ws : size_t(4) << 30);
     ozd_set_backend(g_h, OZD_BACKEND_EMU);
     if (ozd_dgemm(g_h, oa, ob, m, n, k, c.alpha, dA, lda, dB, ldb, c.beta, dC, ldc) != OZD_OK) {
@@ -108,8 +115,11 @@ Result run(const Case& c, std::vector<double>* out_C = nullptr) {
     r.path = info.path;
     r.reason = info.fallback_reason;
     r.blocks = info.col_blocks;
+    r.moduli = info.moduli;
+    r.log2_ratio = info.log2_ratio;
     const double u = std::ldexp(1.0, -53);
-    const int P = ozd_scale_bits(c.moduli);
+    const double tol = c.tol == 0 ? k * u : c.tol;
+    const int P = ozd_scale_bits(info.path == 1 ? info.moduli : 16);
     const double cfac = 4.0 * std::sqrt((double)k) * std::ldexp(1.0, -P);
     for (int64_t j = 0; j < n; ++j)
         for (int64_t i = 0; i < m; ++i) {
@@ -127,6 +137,11 @@ Result run(const Case& c, std::vector<double>* out_C = nullptr) {
             if (!(d <= bound)) r.bound_ratio = std::max(r.bound_ratio, bound > 0 && !std::isnan(d) ? d / bound : INFINITY);
             else if (bound > 0) r.bound_ratio = std::max(r.bound_ratio, d / bound);
             if (nw > 0) r.err_nw = std::max(r.err_nw, d / nw);
+            if (c.tol >= 0) {
+                // AB = |alpha||A||B| + |beta C0|
+                const double lim = tol * (AB[x] - std::fabs(c.beta * C0[x])) + 4 * u * AB[x];
+                r.tol_ratio = std::max(r.tol_ratio, lim > 0 ? d / lim : (d > 0 ? INFINITY : 0.0));
+            }
             if (AB[x] > 0) {
                 r.err_cw = std::max(r.err_cw, d / AB[x]);
                 r.nat_cw = std::max(r.nat_cw, dn / AB[x]);
@@ -136,6 +151,57 @@ Result run(const Case& c, std::vector<double>* out_C = nullptr) {
         }
     if (out_C) *out_C = C;
     return r;
+}
+
+// OZD_BACKEND_AUTO: tiny problems and small-k HPL-like updates at 14 moduli
+// must go native; a large square product with 8 moduli must be emulated.
+// Timing-free: this checks the decision, which comes from the cost model.
+int dispatch_checks() {
+    struct D { const char* name; int64_t m, n, k; int moduli; int expect_path; };
+    const D ds[] = {
+        {"auto-tiny",         64,    64,    64, 14, 0},
+        {"auto-skinny",    16384,    64, 16384, 14, 0},
+        {"auto-hpl-k256",   8192,  8192,   256, 14, 0},
+        {"auto-square-m8",  8192,  8192,  8192,  8, 1},
+    };
+    int fails = 0;
+    ozd_set_backend(g_h, OZD_BACKEND_AUTO);
+    for (const auto& d : ds) {
+        double *A, *B, *C;
+        CK(cudaMalloc(&A, (size_t)d.m * d.k * 8));
+        CK(cudaMalloc(&B, (size_t)d.k * d.n * 8));
+        CK(cudaMalloc(&C, (size_t)d.m * d.n * 8));
+        CK(cudaMemset(A, 0, (size_t)d.m * d.k * 8));  // zeros: fine for a dispatch check
+        CK(cudaMemset(B, 0, (size_t)d.k * d.n * 8));
+        ozd_set_moduli(g_h, d.moduli);
+        ozd_dgemm(g_h, OZD_OP_N, OZD_OP_N, d.m, d.n, d.k, 1.0, A, d.m, B, d.k, 0.0, C, d.m);
+        CK(cudaDeviceSynchronize());
+        ozd_info_t info;
+        ozd_get_info(g_h, &info);
+        const bool ok = info.path == d.expect_path &&
+                        (d.expect_path == 1 || info.fallback_reason == OZD_FALLBACK_DISPATCH);
+        fails += !ok;
+        std::printf("%-18s %5ld %5ld %6ld pred native %8.3f ms emu %8.3f ms -> %s %s\n", d.name,
+                    (long)d.m, (long)d.n, (long)d.k, info.pred_native_ms, info.pred_emu_ms,
+                    info.path ? "emu" : "native", ok ? "PASS" : "FAIL");
+        cudaFree(A); cudaFree(B); cudaFree(C);
+    }
+    ozd_set_backend(g_h, OZD_BACKEND_EMU);
+    return fails;
+}
+
+int adaptive_sweep() {
+    std::printf("gen,m,n,k,tol,path,reason,moduli,log2_ratio,emu_cw,nat_cw,err_over_tol\n");
+    for (const char* gen : {"uniform", "phi0.5", "phi1", "phi2", "phi4", "rowscale"})
+        for (double tol : {0.0, 1e-15, 1e-12, 1e-9, 1e-6, 1e-3})
+            for (int64_t k : {256, 1024, 4096}) {
+                Case c{"adapt", 1024, 1024, k, 0, 0, gen, 1.0, 0.0, 0, 0, 0, tol};
+                Result r = run(c);
+                std::printf("%s,%ld,%ld,%ld,%.0e,%d,%d,%d,%d,%.3e,%.3e,%.3f\n", gen, (long)c.m,
+                            (long)c.n, (long)k, tol, r.path, r.reason, r.moduli, r.log2_ratio,
+                            r.err_cw, r.nat_cw, r.tol_ratio);
+            }
+    return 0;
 }
 
 int suite() {
@@ -164,23 +230,42 @@ int suite() {
         {"col-blocked",      1024, 1024,  512, 0, 0, "uniform",    1.0,  0.0, 14, 0, 24u << 20},
         {"nan-input",         128,  128,  128, 0, 0, "nan",        1.0,  0.0, 14},
         {"inf-input",         128,  128,  128, 0, 0, "inf",        1.0,  0.0, 14},
+        // adaptive moduli: tol 0 = native DGEMM's worst-case bound k*2^-53
+        {"adapt-uniform",    1024, 1024, 1024, 0, 0, "uniform",    1.0,  0.0,  0, 0, 0, 0.0},
+        {"adapt-hpl-beta",   2048, 2048, 1024, 0, 0, "uniform",   -1.0,  1.0,  0, 0, 0, 0.0},
+        {"adapt-phi0.5",      512,  512,  512, 0, 0, "phi0.5",     1.0,  0.0,  0, 0, 0, 0.0},
+        {"adapt-phi2",        512,  512,  512, 0, 0, "phi2",       1.0,  0.0,  0, 0, 0, 0.0},
+        {"adapt-phi4",        512,  512,  512, 0, 0, "phi4",       1.0,  0.0,  0, 0, 0, 0.0},
+        {"adapt-rowscale",    512,  512,  512, 0, 0, "rowscale",   1.0,  0.0,  0, 0, 0, 0.0},
+        {"adapt-zerovecs",    300,  300,  300, 1, 1, "zerovecs",   1.0,  0.5,  0, 0, 0, 0.0},
+        {"adapt-tol1e-6",    1024, 1024, 1024, 0, 0, "uniform",    1.0,  0.0,  0, 0, 0, 1e-6},
+        {"adapt-tol1e-10",   1024, 1024, 1024, 0, 1, "phi2",       1.0,  0.0,  0, 0, 0, 1e-10},
+        {"adapt-blocked",    1024, 1024,  512, 0, 0, "phi0.5",     1.0,  0.0,  0, 0, 24u << 20, 0.0},
     };
     int fails = 0;
-    std::printf("%-18s %5s %5s %6s %3s %4s | %9s %9s %9s | %8s %5s %s\n", "case", "m", "n",
-                "k", "op", "mod", "emu_cw", "nat_cw", "emu_nw", "err/bnd", "path", "result");
+    std::printf("%-18s %5s %5s %6s %3s %4s | %9s %9s %9s | %8s %8s %5s %s\n", "case", "m", "n",
+                "k", "op", "mod", "emu_cw", "nat_cw", "emu_nw", "err/bnd", "err/tol", "path",
+                "result");
     for (const auto& c : cases) {
         Result r = run(c);
         const bool non_finite = !std::strcmp(c.gen, "nan") || !std::strcmp(c.gen, "inf");
         bool ok;
-        if (non_finite) ok = r.path == 0 && r.reason == 1 && r.nan_ok;
+        if (non_finite) ok = r.path == 0 && r.reason == OZD_FALLBACK_NONFINITE && r.nan_ok;
+        else if (c.tol >= 0)  // guarantee met, or declared unreachable
+            ok = r.nan_ok && ((r.path == 1 && r.bound_ratio <= 1.0 && r.tol_ratio <= 1.0) ||
+                              (r.path == 0 && r.reason == OZD_FALLBACK_ACCURACY));
         else ok = r.path == 1 && r.bound_ratio <= 1.0 && r.nan_ok;
         if (c.max_ws) ok = ok && r.blocks > 1;
         fails += !ok;
         char op[3] = {c.ta ? 'T' : 'N', c.tb ? 'T' : 'N', 0};
-        std::printf("%-18s %5ld %5ld %6ld %3s %4d | %9.2e %9.2e %9.2e | %8.3f %5s %s\n", c.name,
-                    (long)c.m, (long)c.n, (long)c.k, op, c.moduli, r.err_cw, r.nat_cw, r.err_nw,
-                    r.bound_ratio, r.path == 1 ? "emu" : "nat", ok ? "PASS" : "FAIL");
+        char path[16];
+        if (r.path == 1) std::snprintf(path, sizeof path, "emu");
+        else std::snprintf(path, sizeof path, "nat/%d", r.reason);
+        std::printf("%-18s %5ld %5ld %6ld %3s %4d | %9.2e %9.2e %9.2e | %8.3f %8.3f %5s %s\n",
+                    c.name, (long)c.m, (long)c.n, (long)c.k, op, r.moduli, r.err_cw, r.nat_cw,
+                    r.err_nw, r.bound_ratio, r.tol_ratio, path, ok ? "PASS" : "FAIL");
     }
+    fails += dispatch_checks();
 
     // Column blocking must not change the answer, and repeated calls must be
     // bitwise identical.
@@ -219,7 +304,10 @@ int sweep() {
 
 int main(int argc, char** argv) {
     if (ozd_create(&g_h, 0) != OZD_OK) return 2;
-    int rc = (argc > 1 && !std::strcmp(argv[1], "--sweep")) ? sweep() : suite();
+    const char* mode = argc > 1 ? argv[1] : "";
+    int rc = !std::strcmp(mode, "--sweep")      ? sweep()
+             : !std::strcmp(mode, "--adaptive") ? adaptive_sweep()
+                                                : suite();
     ozd_destroy(g_h);
     return rc;
 }

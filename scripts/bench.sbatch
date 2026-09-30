@@ -26,3 +26,6 @@ mkdir -p "$OUT"
 
 build/test_ozdgemm | tee "$OUT/test.txt"
 build/bench ${BENCH_ARGS:---preset all --moduli 14,11,8 --breakdown} | tee "$OUT/bench.csv"
+if [[ "${ADAPTIVE_SWEEP:-0}" == 1 ]]; then
+  build/test_ozdgemm --adaptive | tee "$OUT/adaptive.csv"
+fi

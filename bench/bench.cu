@@ -6,9 +6,13 @@
 // median and min over --reps calls after --warmup calls.
 //
 // Usage: bench [--preset square|hpl|skinny|all] [--shape m,n,k]...
-//              [--moduli 14[,11,...]] [--reps 10] [--warmup 3] [--no-native]
-//              [--breakdown] [--nosafety]
-// Output: CSV on stdout.
+//              [--moduli 14[,11,...]] [--tol 0[,1e-6,...]] [--auto]
+//              [--reps 10] [--warmup 3] [--no-native] [--breakdown] [--nosafety]
+//   --moduli  fixed-moduli emulated runs
+//   --tol     adaptive-moduli emulated runs (0 = DGEMM-level tolerance)
+//   --auto    also run every configuration above through OZD_BACKEND_AUTO
+// Output: CSV on stdout; "moduli" is the configured count (0 for adaptive),
+// "used_moduli"/"path"/"fallback" say what the call actually did.
 #include "../tests/common.cuh"
 #include "ozdgemm.h"
 
@@ -37,8 +41,9 @@ static std::vector<Shape> preset(const std::string& p) {
 int main(int argc, char** argv) {
     std::vector<Shape> shapes;
     std::vector<int> moduli = {14};
+    std::vector<double> tols;
     int reps = 10, warmup = 3;
-    bool native = true, breakdown = false, safety = true;
+    bool native = true, breakdown = false, safety = true, with_auto = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() { return std::string(i + 1 < argc ? argv[++i] : ""); };
@@ -52,6 +57,11 @@ int main(int argc, char** argv) {
             std::istringstream ss(next());
             for (std::string t; std::getline(ss, t, ',');) moduli.push_back(std::atoi(t.c_str()));
         }
+        else if (a == "--tol") {
+            std::istringstream ss(next());
+            for (std::string t; std::getline(ss, t, ',');) tols.push_back(std::atof(t.c_str()));
+        }
+        else if (a == "--auto") with_auto = true;
         else if (a == "--reps") reps = std::atoi(next().c_str());
         else if (a == "--warmup") warmup = std::atoi(next().c_str());
         else if (a == "--no-native") native = false;
@@ -79,7 +89,8 @@ int main(int argc, char** argv) {
     CK(cudaEventCreate(&e1));
 
     std::printf("host,gpu,backend,moduli,m,n,k,median_ms,min_ms,tflops_median,col_blocks,"
-                "scale_ms,convert_ms,gemm_ms,reduce_ms,crt_ms\n");
+                "scale_ms,convert_ms,gemm_ms,reduce_ms,crt_ms,tol,path,used_moduli,fallback,"
+                "pred_native_ms,pred_emu_ms,estimate_ms\n");
     for (const auto& s : shapes) {
         std::vector<double> A, B;
         fill(A, s.m, s.k, s.m, Gen::parse("uniform"), 1, true);
@@ -92,13 +103,19 @@ int main(int argc, char** argv) {
         CK(cudaMemcpy(dB, B.data(), B.size() * 8, cudaMemcpyHostToDevice));
         CK(cudaMemset(dC, 0, (size_t)s.m * s.n * 8));
 
-        std::vector<std::pair<int, int>> runs;  // (backend, moduli)
-        if (native) runs.push_back({OZD_BACKEND_NATIVE, 0});
-        for (int md : moduli) runs.push_back({OZD_BACKEND_EMU, md});
-        for (auto [bk, md] : runs) {
+        struct Run { int bk, md; double tol; };  // tol < 0: fixed moduli md
+        std::vector<Run> runs;
+        if (native) runs.push_back({OZD_BACKEND_NATIVE, 0, -1});
+        for (int bk : {OZD_BACKEND_EMU, OZD_BACKEND_AUTO}) {
+            if (bk == OZD_BACKEND_AUTO && !with_auto) continue;
+            for (int md : moduli) runs.push_back({bk, md, -1});
+            for (double t : tols) runs.push_back({bk, 0, t});
+        }
+        for (auto [bk, md, tol] : runs) {
             ozd_set_backend(h, (ozd_backend_t)bk);
-            if (md) ozd_set_moduli(h, md);
-            if (bk == OZD_BACKEND_EMU && ozd_reserve(h, s.m, s.n, s.k) != OZD_OK) {
+            if (tol >= 0) ozd_set_accuracy(h, tol);
+            else if (md) ozd_set_moduli(h, md);
+            if (bk != OZD_BACKEND_NATIVE && ozd_reserve(h, s.m, s.n, s.k) != OZD_OK) {
                 std::fprintf(stderr, "reserve failed for %ld,%ld,%ld\n", (long)s.m, (long)s.n, (long)s.k);
                 continue;
             }
@@ -121,7 +138,7 @@ int main(int argc, char** argv) {
             std::sort(t.begin(), t.end());
             const double med = t[t.size() / 2], mn = t[0];
             ozd_info_t info{};
-            if (breakdown && bk == OZD_BACKEND_EMU) {
+            if (breakdown && bk != OZD_BACKEND_NATIVE) {
                 // Separate, untimed call with per-stage events.
                 ozd_set_profiling(h, 1);
                 call();
@@ -129,10 +146,15 @@ int main(int argc, char** argv) {
             }
             ozd_get_info(h, &info);
             const double tf = 2.0 * s.m * s.n * s.k / (med * 1e-3) / 1e12;
-            std::printf("%s,%s,%s,%d,%ld,%ld,%ld,%.4f,%.4f,%.2f,%d,%.4f,%.4f,%.4f,%.4f,%.4f\n", host,
-                        gpu.c_str(), bk == OZD_BACKEND_NATIVE ? "native" : (std::string("emu_") + ozd_version()).c_str(), md, (long)s.m,
-                        (long)s.n, (long)s.k, med, mn, tf, info.col_blocks, info.t_scale_ms,
-                        info.t_convert_ms, info.t_gemm_ms, info.t_reduce_ms, info.t_crt_ms);
+            const std::string label = bk == OZD_BACKEND_NATIVE ? "native"
+                                      : std::string(bk == OZD_BACKEND_AUTO ? "auto_" : "emu_") + ozd_version();
+            std::printf("%s,%s,%s,%d,%ld,%ld,%ld,%.4f,%.4f,%.2f,%d,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                        "%g,%d,%d,%d,%.4f,%.4f,%.4f\n",
+                        host, gpu.c_str(), label.c_str(), md, (long)s.m, (long)s.n, (long)s.k, med,
+                        mn, tf, info.col_blocks, info.t_scale_ms, info.t_convert_ms, info.t_gemm_ms,
+                        info.t_reduce_ms, info.t_crt_ms, tol, info.path, info.moduli,
+                        info.fallback_reason, info.pred_native_ms, info.pred_emu_ms,
+                        info.t_estimate_ms);
             std::fflush(stdout);
         }
         cudaFree(dA); cudaFree(dB); cudaFree(dC);

@@ -145,16 +145,28 @@ __device__ __forceinline__ void nrm_merge(Nrm& n, const Nrm& o) {
     n.s = m;
 }
 
-// Exponent e such that ||x * 2^e||_2 < 2^P.
-__device__ int vec_exponent(const Nrm& n, int P) {
-    if (n.ss == 0.0) return 0;
+// Per-vector exponents computed by the scale kernels:
+//   norm : floor(log2 ||x||_2) (rounded up slightly), so ||x|| < 2^(norm+1)
+//   amax : ilogb(max |x|)
+// Zero vectors get kZeroVec for both. The scaling exponent for P bits is
+// e = P - 1 - norm, so ||x * 2^e|| < 2^P.
+constexpr int kZeroVec = -(1 << 20);
+
+struct VecExp {
+    int norm, amax;
+};
+
+__device__ VecExp vec_exp(const Nrm& n) {
+    if (n.ss == 0.0) return {kZeroVec, kZeroVec};
     const double nrm = sqrt(n.ss) * (1.0 + 0x1p-40);
-    return P - 1 - (ilogb(nrm) + n.s);
+    return {ilogb(nrm) + n.s, n.s};
 }
+
+__device__ __forceinline__ int scale_exp(int norm) { return c_crt.P - 1 - norm; }
 
 // Vectors with contiguous elements (stride_l == 1): one 128-thread block each.
 __global__ void scale_contig(const double* __restrict__ X, int64_t len, int64_t sv,
-                             int* __restrict__ e, int* __restrict__ flag) {
+                             VecExp* __restrict__ e, int* __restrict__ flag) {
     const int64_t v = blockIdx.x;
     const double* x = X + v * sv;
     Nrm n = kNrmEmpty;
@@ -178,14 +190,14 @@ __global__ void scale_contig(const double* __restrict__ X, int64_t len, int64_t 
     if (threadIdx.x == 0) {
         for (int w = 1; w < (int)blockDim.x / 32; ++w) nrm_merge(n, part[w]);
         if (any_bad) atomicExch(flag, 1);
-        e[v] = vec_exponent(n, c_crt.P);
+        e[v] = vec_exp(n);
     }
 }
 
 // Vectors with strided elements (stride_v == 1): a 32x32 block covers 32
 // vectors; threadIdx.x walks vectors (coalesced), threadIdx.y splits the length.
 __global__ void scale_strided(const double* __restrict__ X, int64_t nvec, int64_t len,
-                              int64_t sl, int* __restrict__ e, int* __restrict__ flag) {
+                              int64_t sl, VecExp* __restrict__ e, int* __restrict__ flag) {
     const int64_t v = (int64_t)blockIdx.x * 32 + threadIdx.x;
     Nrm n = kNrmEmpty;
     bool bad = false;
@@ -201,45 +213,22 @@ __global__ void scale_strided(const double* __restrict__ X, int64_t nvec, int64_
     __syncthreads();
     if (threadIdx.y == 0 && v < nvec) {
         for (int y = 1; y < 32; ++y) nrm_merge(n, part[y][threadIdx.x]);
-        e[v] = vec_exponent(n, c_crt.P);
+        e[v] = vec_exp(n);
     }
 }
 
-// Element (v, l) of a set of vectors lives at X[v*sv + l*sl]. Writes, for each
-// modulus t, out[t*slab + v*kp + l] = trunc(x * 2^e[v]) mod m_t (symmetric
-// int8), zero-padding l in [len, kp). A 32x32 tile goes through shared memory
-// so the read is coalesced for either stride; each thread then writes 4
-// consecutive residues as one 32-bit store.
-__global__ void convert(const double* __restrict__ X, int64_t sv, int64_t sl,
-                        int64_t v0, int64_t nvec, int64_t len, int64_t kp,
-                        const int* __restrict__ e, int8_t* __restrict__ out,
-                        int64_t slab) {
-    __shared__ double tile[32][33];
-    const int64_t vb = (int64_t)blockIdx.y * 32, lb = (int64_t)blockIdx.x * 32;
-    const bool contig_l = (sl == 1);
-    for (int r = threadIdx.y; r < 32; r += blockDim.y) {
-        const int vi = contig_l ? r : threadIdx.x;
-        const int li = contig_l ? threadIdx.x : r;
-        const int64_t v = vb + vi, l = lb + li;
-        double val = 0.0;
-        if (v < nvec && l < len) val = trunc(ldexp(X[(v0 + v) * sv + l * sl], e[v0 + v]));
-        tile[vi][li] = val;
-    }
-    __syncthreads();
-    const int tid = threadIdx.y * 32 + threadIdx.x;  // blockDim = (32, 8)
-    const int r = tid >> 3, lg = (tid & 7) * 4;
-    const int64_t v = vb + r, l = lb + lg;
-    if (v >= nvec || l >= kp) return;  // kp % 16 == 0, so l+3 < kp too
+// Writes the symmetric int8 residues of 4 consecutive integer-valued doubles
+// (|val| < 2^61) for every modulus: o[t*slab + u] = val[u] mod m_t.
+__device__ __forceinline__ void write_residues(const double* val4, int8_t* o, int64_t slab) {
     // |val| < 2^61: split as hi*2^32 + lo with lo in [0, 2^32) so that every
     // mod_small argument stays below 2^52.
     double hi[4], lo[4];
 #pragma unroll
     for (int u = 0; u < 4; ++u) {
-        const double val = tile[r][lg + u];
+        const double val = val4[u];
         hi[u] = floor(val * 0x1p-32);
         lo[u] = fma(-hi[u], 0x1p32, val);
     }
-    int8_t* o = out + v * kp + l;
     const int n = c_crt.n;
     for (int t = 0; t < n; ++t) {
         const double m = c_crt.md[t], im = c_crt.inv_m[t], c32 = c_crt.c32[t];
@@ -252,6 +241,50 @@ __global__ void convert(const double* __restrict__ X, int64_t sv, int64_t sl,
             packed |= (uint32_t)(uint8_t)(int8_t)(int)rr << (8 * u);
         }
         *reinterpret_cast<uint32_t*>(o + t * slab) = packed;
+    }
+}
+
+// Element (v, l) of a set of vectors lives at X[v*sv + l*sl]. Writes, for each
+// modulus t, out[t*slab + v*kp + l] = trunc(x * 2^e[v]) mod m_t (symmetric
+// int8), zero-padding l in [len, kp). A 32x32 tile goes through shared memory
+// so the read is coalesced for either stride; each thread then writes 4
+// consecutive residues as one 32-bit store.
+//
+// ABS mode instead writes a single slab of floor(|x| * 2^(6 - amax[v])), a
+// value in [0, 127] that never exceeds |x| * 2^(6 - amax[v]); the INT8 GEMM of
+// two such slabs is a lower bound on |A||B| (used to pick the moduli count).
+template <bool ABS>
+__global__ void convert(const double* __restrict__ X, int64_t sv, int64_t sl,
+                        int64_t v0, int64_t nvec, int64_t len, int64_t kp,
+                        const VecExp* __restrict__ e, int8_t* __restrict__ out,
+                        int64_t slab) {
+    __shared__ double tile[32][33];
+    const int64_t vb = (int64_t)blockIdx.y * 32, lb = (int64_t)blockIdx.x * 32;
+    const bool contig_l = (sl == 1);
+    for (int r = threadIdx.y; r < 32; r += blockDim.y) {
+        const int vi = contig_l ? r : threadIdx.x;
+        const int li = contig_l ? threadIdx.x : r;
+        const int64_t v = vb + vi, l = lb + li;
+        double val = 0.0;
+        if (v < nvec && l < len) {
+            const double a = X[(v0 + v) * sv + l * sl];
+            const VecExp ev = e[v0 + v];
+            val = ABS ? floor(ldexp(fabs(a), 6 - ev.amax)) : trunc(ldexp(a, scale_exp(ev.norm)));
+        }
+        tile[vi][li] = val;
+    }
+    __syncthreads();
+    const int tid = threadIdx.y * 32 + threadIdx.x;  // blockDim = (32, 8)
+    const int r = tid >> 3, lg = (tid & 7) * 4;
+    const int64_t v = vb + r, l = lb + lg;
+    if (v >= nvec || l >= kp) return;  // kp % 16 == 0, so l+3 < kp too
+    if constexpr (ABS) {
+        uint32_t packed = 0;
+#pragma unroll
+        for (int u = 0; u < 4; ++u) packed |= (uint32_t)tile[r][lg + u] << (8 * u);
+        *reinterpret_cast<uint32_t*>(out + v * kp + l) = packed;
+    } else {
+        write_residues(&tile[r][lg], out + v * kp + l, slab);
     }
 }
 
@@ -291,13 +324,13 @@ __device__ __forceinline__ double scale2(double x, int k) {
 // modulus. NCH = number of 40-bit chunks of M.
 template <int NCH>
 __global__ void crt(const int32_t* __restrict__ C32, int64_t slab, int64_t mp,
-                    int64_t m, int64_t nb, int64_t j0, const int* __restrict__ eA,
-                    const int* __restrict__ eB, double alpha, double beta,
+                    int64_t m, int64_t nb, int64_t j0, const VecExp* __restrict__ eA,
+                    const VecExp* __restrict__ eB, double alpha, double beta,
                     double* __restrict__ C, int64_t ldc) {
     const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= m) return;
     const int n = c_crt.n;
-    const int ea = eA[i];
+    const int ea = scale_exp(eA[i].norm);
     for (int64_t j = blockIdx.y; j < nb; j += gridDim.y) {
         const int32_t* p = C32 + i + j * mp;
         double s[NCH];
@@ -321,10 +354,38 @@ __global__ void crt(const int32_t* __restrict__ C32, int64_t slab, int64_t mp,
             two_sum(hi, r, hi, err);
             lo += err;
         }
-        const double x = scale2(hi + lo, -(ea + eB[j0 + j]));
+        const double x = scale2(hi + lo, -(ea + scale_exp(eB[j0 + j].norm)));
         double* c = C + i + (j0 + j) * ldc;
         *c = beta == 0.0 ? alpha * x : fma(alpha, x, beta * *c);
     }
+}
+
+// For the lower bound G = floor|A| * floor|B| (INT8 GEMM of ABS-mode slabs),
+// computes max over entries of an upper bound on
+//   log2( ||A_i|| * ||B_j|| / (|A||B|)_ij ),
+// using ||A_i|| < 2^(norm+1) and (|A||B|)_ij >= G_ij * 2^(amaxA + amaxB - 12).
+// Entries with a zero row/column need no accuracy (their result is exact);
+// entries with G_ij == 0 get kNoBound (the bound is unusable there).
+constexpr int kNoBound = 1 << 20;
+
+__global__ void ratio_bound(const int32_t* __restrict__ G, int64_t mp, int64_t m,
+                            int64_t nb, int64_t j0, const VecExp* __restrict__ eA,
+                            const VecExp* __restrict__ eB, int* __restrict__ out) {
+    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int best = -kNoBound;
+    if (i < m) {
+        const VecExp a = eA[i];
+        for (int64_t j = blockIdx.y; j < nb; j += gridDim.y) {
+            const VecExp b = eB[j0 + j];
+            if (a.norm == kZeroVec || b.norm == kZeroVec) continue;
+            const int32_t g = G[i + j * mp];
+            const int t = g > 0 ? a.norm + b.norm + 14 - a.amax - b.amax - (31 - __clz(g))
+                                : kNoBound;
+            best = max(best, t);
+        }
+    }
+    for (int o = 16; o; o >>= 1) best = max(best, __shfl_xor_sync(~0u, best, o));
+    if (threadIdx.x % 32 == 0) atomicMax(out, best);
 }
 
 }  // namespace
@@ -332,19 +393,21 @@ __global__ void crt(const int32_t* __restrict__ C32, int64_t slab, int64_t mp,
 // ---------------------------------------------------------------- handle
 
 struct ozd_context {
-    cudaStream_t   stream = nullptr;
-    cublasHandle_t cublas = nullptr;
-    ozd_backend_t  backend = OZD_BACKEND_EMU;
-    int            moduli = 14;
-    CrtConst       crt{};
-    size_t         max_ws = size_t(4) << 30;
-    bool           safety = true;
-    bool           profiling = false;
-    void*          ws = nullptr;
-    size_t         ws_bytes = 0;
-    int*           h_flag = nullptr;  // pinned
-    cudaEvent_t    ev[6] = {};
-    ozd_info_t     info{};
+    cudaStream_t      stream = nullptr;
+    cublasHandle_t    cublas = nullptr;
+    ozd_backend_t     backend = OZD_BACKEND_EMU;
+    int               moduli = 14;
+    double            tol = -1.0;  // < 0: fixed moduli; 0: DGEMM-level; > 0: target
+    CrtConst          crt{};
+    ozd_cost_model_t  model{};
+    size_t            max_ws = size_t(4) << 30;
+    bool              safety = true;
+    bool              profiling = false;
+    void*             ws = nullptr;
+    size_t            ws_bytes = 0;
+    int*              h_flag = nullptr;  // pinned: [0] non-finite flag, [1] log2 ratio bound
+    cudaEvent_t       ev[6] = {};
+    ozd_info_t        info{};
 };
 
 namespace {
@@ -369,6 +432,52 @@ namespace {
         }                                                                        \
     } while (0)
 
+// Defaults fitted on an H200 from job 441237 (scripts/fit_model.py): worst
+// prediction error 17%, 63/63 dispatch decisions correct on that grid. The
+// CRT read traffic moves in lockstep with the INT32 GEMM output, so the fit
+// folds it into gemm_out_gbs and crt_gbs is effectively infinite.
+constexpr ozd_cost_model_t kDefaultModel = {
+    /*native_overhead_ms*/ 0.01265, /*native_tflops*/ 56.66,
+    /*emu_overhead_ms*/ 0.05899, /*int8_tops*/ 1182.0, /*convert_gbs*/ 949.4,
+    /*gemm_out_gbs*/ 1637.0, /*crt_gbs*/ 1e30,
+};
+
+// Scaling bits P for each moduli count (index = count).
+int scale_bits_table(int n) {
+    static int tab[kMaxModuli + 1] = {0};
+    if (!tab[kMaxModuli])
+        for (int i = 2; i <= kMaxModuli; ++i) tab[i] = make_crt(i).P;
+    return tab[n];
+}
+
+// Smallest moduli count whose scaling gives at least P bits, or 0 if none.
+int moduli_for_bits(int P) {
+    for (int n = 2; n <= kMaxModuli; ++n)
+        if (scale_bits_table(n) >= P) return n;
+    return 0;
+}
+
+// Bits needed so that 4*sqrt(k)*2^-P * 2^log2_ratio <= tol (see README).
+int bits_needed(int log2_ratio, int64_t k, double tol) {
+    return (int)std::ceil(log2_ratio + 2.0 + 0.5 * std::log2((double)k) - std::log2(tol));
+}
+
+double pred_native_ms(const ozd_cost_model_t& c, double m, double n, double k) {
+    return c.native_overhead_ms + 2 * m * n * k / (c.native_tflops * 1e9);
+}
+
+// Emulated time for N moduli; with estimate=true, add the |A||B| bound pass.
+double pred_emu_ms(const ozd_cost_model_t& c, double m, double n, double kp, int N,
+                   bool beta_nonzero, bool estimate) {
+    const double conv = (m + n) * kp * (8 + N) / (c.convert_gbs * 1e6);
+    const double gemm1 = 2 * m * n * kp / (c.int8_tops * 1e9) + 4 * m * n / (c.gemm_out_gbs * 1e6);
+    const double crt = (4.0 * N + 8 + (beta_nonzero ? 8 : 0)) * m * n / (c.crt_gbs * 1e6);
+    double t = c.emu_overhead_ms + conv + N * gemm1 + crt;
+    if (estimate)
+        t += (m + n) * kp * 9 / (c.convert_gbs * 1e6) + gemm1 + 4 * m * n / (c.crt_gbs * 1e6);
+    return t;
+}
+
 struct Layout {
     int64_t kp, mp, nb;
     size_t  off_eA, off_eB, off_flag, off_A8, off_B8, off_C32, total;
@@ -380,15 +489,15 @@ size_t align256(size_t x) { return (x + 255) & ~size_t(255); }
 bool plan(int nmod, int64_t m, int64_t n, int64_t k, size_t cap, Layout& L) {
     L.kp = round_up(std::max<int64_t>(k, 1), kPadK);
     L.mp = round_up(m, 4);
-    const size_t fixed = align256(4 * m) + align256(4 * n) + 256 +
+    const size_t fixed = align256(8 * m) + align256(8 * n) + 256 +
                          align256((size_t)nmod * m * L.kp) + 4 * 256;
     // per column of C: converted B for every modulus + one INT32 product per modulus
     const size_t per_col = (size_t)nmod * L.kp + (size_t)4 * nmod * L.mp;
     if (fixed + per_col > cap) return false;
     L.nb = std::min<int64_t>(n, (int64_t)((cap - fixed) / per_col));
     size_t o = 0;
-    L.off_eA = o;   o += align256(4 * m);
-    L.off_eB = o;   o += align256(4 * n);
+    L.off_eA = o;   o += align256(8 * m);
+    L.off_eB = o;   o += align256(8 * n);
     L.off_flag = o; o += 256;
     L.off_A8 = o;   o += align256((size_t)nmod * m * L.kp);
     L.off_B8 = o;   o += align256((size_t)nmod * L.nb * L.kp);
@@ -396,6 +505,8 @@ bool plan(int nmod, int64_t m, int64_t n, int64_t k, size_t cap, Layout& L) {
     L.total = o;
     return true;
 }
+
+int plan_moduli(ozd_handle_t h) { return h->tol >= 0 ? kMaxModuli : h->moduli; }
 
 ozd_status_t ensure_ws(ozd_handle_t h, size_t bytes) {
     if (bytes <= h->ws_bytes) return OZD_OK;
@@ -411,12 +522,12 @@ ozd_status_t ensure_ws(ozd_handle_t h, size_t bytes) {
 // handle (handles with different moduli counts may be interleaved).
 int g_loaded_moduli = 0;
 
-ozd_status_t load_moduli(ozd_handle_t h) {
-    if (h->crt.n != h->moduli) h->crt = make_crt(h->moduli);
-    if (g_loaded_moduli == h->moduli) return OZD_OK;
+ozd_status_t load_moduli(ozd_handle_t h, int n) {
+    if (h->crt.n != n) h->crt = make_crt(n);
+    if (g_loaded_moduli == n) return OZD_OK;
     OZD_CUDA(cudaMemcpyToSymbolAsync(c_crt, &h->crt, sizeof(CrtConst), 0,
                                      cudaMemcpyHostToDevice, h->stream));
-    g_loaded_moduli = h->moduli;
+    g_loaded_moduli = n;
     return OZD_OK;
 }
 
@@ -453,6 +564,10 @@ struct StageTimer {
     }
 };
 
+dim3 convert_grid(int64_t kp, int64_t nvec) {
+    return dim3((unsigned)((kp + 31) / 32), (unsigned)((nvec + 31) / 32));
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------- API
@@ -463,9 +578,10 @@ ozd_status_t ozd_create(ozd_handle_t* out, cudaStream_t stream) {
     if (!out) return OZD_ERR_ARG;
     auto* h = new ozd_context;
     h->stream = stream;
+    h->model = kDefaultModel;
     if (cublasCreate(&h->cublas) != CUBLAS_STATUS_SUCCESS) { delete h; return OZD_ERR_CUBLAS; }
     cublasSetStream(h->cublas, stream);
-    OZD_CUDA(cudaMallocHost(&h->h_flag, sizeof(int)));
+    OZD_CUDA(cudaMallocHost(&h->h_flag, 2 * sizeof(int)));
     for (auto& e : h->ev) OZD_CUDA(cudaEventCreate(&e));
     *out = h;
     return OZD_OK;
@@ -482,7 +598,7 @@ ozd_status_t ozd_destroy(ozd_handle_t h) {
 }
 
 ozd_status_t ozd_set_backend(ozd_handle_t h, ozd_backend_t b) {
-    if (b != OZD_BACKEND_NATIVE && b != OZD_BACKEND_EMU) return OZD_ERR_ARG;
+    if (b != OZD_BACKEND_NATIVE && b != OZD_BACKEND_EMU && b != OZD_BACKEND_AUTO) return OZD_ERR_ARG;
     h->backend = b;
     return OZD_OK;
 }
@@ -490,6 +606,25 @@ ozd_status_t ozd_set_backend(ozd_handle_t h, ozd_backend_t b) {
 ozd_status_t ozd_set_moduli(ozd_handle_t h, int moduli) {
     if (moduli < 2 || moduli > kMaxModuli) return OZD_ERR_ARG;
     h->moduli = moduli;
+    h->tol = -1.0;
+    return OZD_OK;
+}
+
+ozd_status_t ozd_set_accuracy(ozd_handle_t h, double tol) {
+    if (!(tol >= 0.0) || tol >= 1.0) return OZD_ERR_ARG;
+    h->tol = tol;
+    return OZD_OK;
+}
+
+ozd_status_t ozd_set_cost_model(ozd_handle_t h, const ozd_cost_model_t* m) {
+    if (!h || !m) return OZD_ERR_ARG;
+    h->model = *m;
+    return OZD_OK;
+}
+
+ozd_status_t ozd_get_cost_model(ozd_handle_t h, ozd_cost_model_t* m) {
+    if (!h || !m) return OZD_ERR_ARG;
+    *m = h->model;
     return OZD_OK;
 }
 
@@ -497,14 +632,14 @@ ozd_status_t ozd_set_max_workspace(ozd_handle_t h, size_t bytes) { h->max_ws = b
 ozd_status_t ozd_set_safety_check(ozd_handle_t h, int on) { h->safety = on != 0; return OZD_OK; }
 ozd_status_t ozd_set_profiling(ozd_handle_t h, int on) { h->profiling = on != 0; return OZD_OK; }
 cublasHandle_t ozd_cublas(ozd_handle_t h) { return h->cublas; }
-const char* ozd_version(void) { return "v1"; }
+const char* ozd_version(void) { return "v2"; }
 int ozd_scale_bits(int moduli) {
-    return moduli < 2 || moduli > kMaxModuli ? -1 : make_crt(moduli).P;
+    return moduli < 2 || moduli > kMaxModuli ? -1 : scale_bits_table(moduli);
 }
 
 size_t ozd_workspace_bytes(ozd_handle_t h, int64_t m, int64_t n, int64_t k) {
     Layout L;
-    return plan(h->moduli, m, n, k, h->max_ws, L) ? L.total : 0;
+    return plan(plan_moduli(h), m, n, k, h->max_ws, L) ? L.total : 0;
 }
 
 ozd_status_t ozd_reserve(ozd_handle_t h, int64_t m, int64_t n, int64_t k) {
@@ -527,27 +662,41 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
     if (ldc < std::max<int64_t>(1, m)) return OZD_ERR_ARG;
     std::memset(&h->info, 0, sizeof h->info);
     if (m == 0 || n == 0) return OZD_OK;
-    if (h->backend == OZD_BACKEND_NATIVE)
-        return native(h, ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, 0);
-    if (k == 0 || alpha == 0.0 || k > kMaxK)
-        return native(h, ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, 2);
+    auto fallback = [&](int reason) {
+        return native(h, ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, reason);
+    };
+    if (h->backend == OZD_BACKEND_NATIVE) return fallback(0);
+    if (k == 0 || alpha == 0.0 || k > kMaxK) return fallback(OZD_FALLBACK_DEGENERATE);
+
+    // Moduli count: fixed, or (adaptive) at least what the tolerance needs
+    // even in the best case log2_ratio = 0; refined after the bound pass.
+    const bool adaptive = h->tol >= 0;
+    const double tol = h->tol == 0 ? std::ldexp((double)k, -53) : h->tol;
+    int nmod = adaptive ? moduli_for_bits(bits_needed(0, k, tol)) : h->moduli;
+    if (nmod == 0) return fallback(OZD_FALLBACK_ACCURACY);
+
+    const int64_t kp = round_up(k, kPadK);
+    const bool auto_bk = h->backend == OZD_BACKEND_AUTO;
+    h->info.pred_native_ms = pred_native_ms(h->model, m, n, k);
+    h->info.pred_emu_ms = pred_emu_ms(h->model, m, n, kp, nmod, beta != 0, adaptive);
+    if (auto_bk && h->info.pred_emu_ms >= h->info.pred_native_ms)
+        return fallback(OZD_FALLBACK_DISPATCH);
 
     Layout L;
-    if (!plan(h->moduli, m, n, k, h->max_ws, L))
-        return native(h, ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, 2);
+    if (!plan(plan_moduli(h), m, n, k, h->max_ws, L)) return fallback(OZD_FALLBACK_DEGENERATE);
     if (auto s = ensure_ws(h, L.total)) return s;
-    if (auto s = load_moduli(h)) return s;
 
     char* ws = (char*)h->ws;
-    int* eA = (int*)(ws + L.off_eA);
-    int* eB = (int*)(ws + L.off_eB);
-    int* flag = (int*)(ws + L.off_flag);
+    VecExp* eA = (VecExp*)(ws + L.off_eA);
+    VecExp* eB = (VecExp*)(ws + L.off_eB);
+    int* flag = (int*)(ws + L.off_flag);  // [0] non-finite, [1] log2 ratio bound
     int8_t* A8 = (int8_t*)(ws + L.off_A8);
     int8_t* B8 = (int8_t*)(ws + L.off_B8);
     int32_t* C32 = (int32_t*)(ws + L.off_C32);
-    const int nmod = h->moduli;
     cudaStream_t st = h->stream;
     StageTimer tm{h};
+    const dim3 cblk(32, 8);
+    const int32_t one = 1, zero = 0;
 
     // Row i of op(A): element l at A[i*svA + l*slA]; column j of op(B) likewise.
     const int64_t svA = ta == OZD_OP_N ? 1 : lda, slA = ta == OZD_OP_N ? lda : 1;
@@ -556,7 +705,8 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
     nvtxRangePushA("ozd:scale");
     tm.mark();
     OZD_CUDA(cudaMemsetAsync(flag, 0, sizeof(int), st));
-    auto scale = [&](const double* X, int64_t nvec, int64_t sv, int64_t sl, int* e) {
+    OZD_CUDA(cudaMemsetAsync(flag + 1, 0x80, sizeof(int), st));  // very negative
+    auto scale = [&](const double* X, int64_t nvec, int64_t sv, int64_t sl, VecExp* e) {
         if (sl == 1)
             scale_contig<<<(unsigned)nvec, 128, 0, st>>>(X, k, sv, e, flag);
         else
@@ -566,40 +716,64 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
     scale(B, n, svB, slB, eB);
     OZD_CUDA(cudaGetLastError());
     nvtxRangePop();
-    if (h->safety) {
-        OZD_CUDA(cudaMemcpyAsync(h->h_flag, flag, sizeof(int), cudaMemcpyDeviceToHost, st));
-        OZD_CUDA(cudaStreamSynchronize(st));
-        if (*h->h_flag)
-            return native(h, ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, 1);
-    }
     h->info.t_scale_ms += tm.lap();
 
+    if (adaptive) {
+        // Lower bound of |A||B| via one INT8 GEMM of floor-quantized |A|, |B|.
+        nvtxRangePushA("ozd:estimate");
+        convert<true><<<convert_grid(kp, m), cblk, 0, st>>>(A, svA, slA, 0, m, k, kp, eA, A8, 0);
+        for (int64_t j0 = 0; j0 < n; j0 += L.nb) {
+            const int64_t nb = std::min(L.nb, n - j0);
+            convert<true><<<convert_grid(kp, nb), cblk, 0, st>>>(B, svB, slB, j0, nb, k, kp, eB, B8, 0);
+            OZD_CUBLAS(cublasGemmEx_64(h->cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, nb, kp, &one,
+                                       A8, CUDA_R_8I, kp, B8, CUDA_R_8I, kp, &zero, C32,
+                                       CUDA_R_32I, L.mp, CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT));
+            const dim3 g((unsigned)((m + 255) / 256), (unsigned)std::min<int64_t>(nb, 4096));
+            ratio_bound<<<g, 256, 0, st>>>(C32, L.mp, m, nb, j0, eA, eB, flag + 1);
+        }
+        OZD_CUDA(cudaGetLastError());
+        nvtxRangePop();
+        h->info.t_estimate_ms += tm.lap();
+    }
+
+    if (h->safety || adaptive) {
+        OZD_CUDA(cudaMemcpyAsync(h->h_flag, flag, 2 * sizeof(int), cudaMemcpyDeviceToHost, st));
+        OZD_CUDA(cudaStreamSynchronize(st));
+        if (h->h_flag[0]) return fallback(OZD_FALLBACK_NONFINITE);
+    }
+    if (adaptive) {
+        const int lr = std::max(h->h_flag[1], 0);  // the ratio is >= 1 by Cauchy-Schwarz
+        h->info.log2_ratio = lr;
+        nmod = lr >= kNoBound ? 0 : moduli_for_bits(bits_needed(lr, k, tol));
+        if (nmod == 0) return fallback(OZD_FALLBACK_ACCURACY);
+        h->info.pred_emu_ms = pred_emu_ms(h->model, m, n, kp, nmod, beta != 0, false);
+        if (auto_bk && h->info.pred_emu_ms >= h->info.pred_native_ms)
+            return fallback(OZD_FALLBACK_DISPATCH);
+    }
+    if (auto s = load_moduli(h, nmod)) return s;
+
     nvtxRangePushA("ozd:convertA");
-    const dim3 cblk(32, 8);
-    const int64_t slabA = m * L.kp;
-    convert<<<dim3((unsigned)(L.kp / 32 + (L.kp % 32 != 0)), (unsigned)((m + 31) / 32)), cblk, 0, st>>>(
-        A, svA, slA, 0, m, k, L.kp, eA, A8, slabA);
+    const int64_t slabA = m * kp;
+    convert<false><<<convert_grid(kp, m), cblk, 0, st>>>(A, svA, slA, 0, m, k, kp, eA, A8, slabA);
     OZD_CUDA(cudaGetLastError());
     nvtxRangePop();
     h->info.t_convert_ms += tm.lap();
 
-    const int32_t one = 1, zero = 0;
     int blocks = 0;
     for (int64_t j0 = 0; j0 < n; j0 += L.nb, ++blocks) {
         const int64_t nb = std::min(L.nb, n - j0);
-        const int64_t slabB = nb * L.kp, slabC = L.mp * nb;
+        const int64_t slabB = nb * kp, slabC = L.mp * nb;
 
         nvtxRangePushA("ozd:convertB");
-        convert<<<dim3((unsigned)(L.kp / 32 + (L.kp % 32 != 0)), (unsigned)((nb + 31) / 32)), cblk, 0, st>>>(
-            B, svB, slB, j0, nb, k, L.kp, eB, B8, slabB);
+        convert<false><<<convert_grid(kp, nb), cblk, 0, st>>>(B, svB, slB, j0, nb, k, kp, eB, B8, slabB);
         OZD_CUDA(cudaGetLastError());
         nvtxRangePop();
         h->info.t_convert_ms += tm.lap();
 
         nvtxRangePushA("ozd:gemm");
         OZD_CUBLAS(cublasGemmStridedBatchedEx_64(
-            h->cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, nb, L.kp, &one, A8, CUDA_R_8I, L.kp,
-            slabA, B8, CUDA_R_8I, L.kp, slabB, &zero, C32, CUDA_R_32I, L.mp, slabC, nmod,
+            h->cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, nb, kp, &one, A8, CUDA_R_8I, kp,
+            slabA, B8, CUDA_R_8I, kp, slabB, &zero, C32, CUDA_R_32I, L.mp, slabC, nmod,
             CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT));
         nvtxRangePop();
         h->info.t_gemm_ms += tm.lap();
