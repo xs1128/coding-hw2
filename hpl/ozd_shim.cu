@@ -45,6 +45,7 @@ struct Stats {
     double t_cpu = 0, t_h2d = 0, t_gemm = 0, t_d2h = 0;  // seconds, per-stream busy time
     double t_wall = 0;  // wall time of the offloaded calls (copies + GEMM, overlapped or not)
     double bytes = 0;
+    long   late_allocs = 0;  // device buffer (re)allocations after HPL_ozd_register
     int    moduli_min = 99, moduli_max = 0;
     long   fallbacks[5] = {0, 0, 0, 0, 0};
 };
@@ -66,6 +67,7 @@ struct Shim {
     size_t        cap[3] = {0, 0, 0};
     Stats         s;
     bool          init = false;
+    bool          prealloc = false;  // HPL_ozd_register sized the buffers up front
 
     void setup() {
         init = true;
@@ -94,6 +96,7 @@ struct Shim {
     static void report();
 
     void events(size_t n) {
+        if (prealloc && pev.size() < n) s.late_allocs++;
         while (pev.size() < n) {
             cudaEvent_t e;
             cudaEventCreate(&e);
@@ -103,6 +106,7 @@ struct Shim {
 
     void grow(int i, size_t bytes) {
         if (bytes <= cap[i]) return;
+        if (prealloc) s.late_allocs++;
         double** p = i == 0 ? &dA : i == 1 ? &dB : &dC;
         if (*p) cudaFree(*p);
         cudaMalloc(p, bytes);
@@ -117,12 +121,13 @@ void Shim::report() {
     const char* mode = g.mode == NATIVE ? "native" : g.mode == AUTO ? "auto" : "emu";
     std::fprintf(stderr,
                  "OZD_HPL mode=%s pipe=%d chunk=%d calls cpu=%ld gpu=%ld (emulated %ld, moduli %d..%d) "
-                 "fallbacks[nonfinite,degenerate,dispatch,accuracy]=%ld,%ld,%ld,%ld\n"
+                 "fallbacks[nonfinite,degenerate,dispatch,accuracy]=%ld,%ld,%ld,%ld "
+                 "late_allocs=%ld\n"
                  "OZD_HPL gflop cpu=%.1f gpu=%.1f | time s: cpu_blas=%.2f h2d=%.2f gemm=%.2f "
                  "d2h=%.2f wall=%.2f | pcie GB=%.1f\n",
                  mode, g.pipe, g.chunk, s.cpu_calls, s.gpu_calls, s.emu_calls,
                  s.emu_calls ? s.moduli_min : 0, s.moduli_max, s.fallbacks[1], s.fallbacks[2],
-                 s.fallbacks[3], s.fallbacks[4], s.cpu_flop / 1e9, s.gpu_flop / 1e9, s.t_cpu,
+                 s.fallbacks[3], s.fallbacks[4], s.late_allocs, s.cpu_flop / 1e9, s.gpu_flop / 1e9, s.t_cpu,
                  s.t_h2d, s.t_gemm, s.t_d2h, s.t_wall, s.bytes / 1e9);
 }
 
@@ -248,10 +253,27 @@ void gemm_pipelined(int ta, int tb, int M, int N, int K, double alpha, const dou
 
 extern "C" {
 
-// Called by the patched HPL_pdtest around the matrix allocation.
-void HPL_ozd_register(void* p, size_t bytes) {
+// Called by the patched HPL_pdtest after the matrix allocation, before the
+// timed solve. Page-locks the matrix and allocates every device buffer, the
+// ozdgemm workspace and the chunk events for the largest update this rank can
+// see (local mp x nq trailing matrix, K = nb); the trailing matrix only
+// shrinks, so no offloaded call allocates (late_allocs in the report).
+void HPL_ozd_register(void* p, size_t bytes, int mp, int nq, int nb) {
     if (!g.init) g.setup();
-    if (g.mode != CPU && g.reg && p) cudaHostRegister(p, bytes, cudaHostRegisterDefault);
+    if (g.mode == CPU) return;
+    if (g.reg && p) cudaHostRegister(p, bytes, cudaHostRegisterDefault);
+    if (mp <= 0 || nq <= 0 || nb <= 0) return;
+    g.grow(0, (size_t)mp * nb * 8);
+    g.grow(1, (size_t)nb * nq * 8);
+    g.grow(2, (size_t)mp * nq * 8);
+    if (g.pipe) {
+        ozd_reserve(g.h, mp, std::min(nq, g.chunk), nb);
+        g.events(6 * (size_t)((nq + g.chunk - 1) / g.chunk) + 2);
+    } else {
+        ozd_reserve(g.h, mp, nq, nb);
+    }
+    cudaDeviceSynchronize();
+    g.prealloc = true;
 }
 void HPL_ozd_unregister(void* p) {
     if (g.mode != CPU && g.reg && p) cudaHostUnregister(p);

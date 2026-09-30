@@ -10,8 +10,9 @@
 +#define HPL_OZD_UNREG( p )
 +#endif
 +#ifdef HPL_OZD
-+/* ozd_shim.cu: page-lock the matrix so GPU offload copies run at full PCIe rate */
-+void HPL_ozd_register( void *, size_t );
++/* ozd_shim.cu: page-lock the matrix so GPU offload copies run at full PCIe
++ * rate, and allocate all device buffers before the timed solve */
++void HPL_ozd_register( void *, size_t, int, int, int );
 +void HPL_ozd_unregister( void * );
 +#endif
 +
@@ -24,7 +25,8 @@
     }
 +#ifdef HPL_OZD
 +   HPL_ozd_register( vptr, ( (size_t)(ALGO->align) +
-+                             (size_t)(mat.ld+1) * (size_t)(mat.nq) ) * sizeof(double) );
++                             (size_t)(mat.ld+1) * (size_t)(mat.nq) ) * sizeof(double),
++                     mat.mp, mat.nq, mat.nb );
 +#endif
  /*
   * generate matrix and right-hand-side, [ A | b ] which is N by N+1.
