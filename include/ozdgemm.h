@@ -67,6 +67,8 @@ typedef struct {
     double t_gemm_ms;
     double t_reduce_ms;     // v0 only (separate INT32 -> uint8 pass); 0 since v1
     double t_crt_ms;
+    int    estimate_level;  // adaptive mode: 0 none, 1 one-band |A||B| bound,
+                            // 2 two-band bound (run when level 1 cannot certify)
 } ozd_info_t;
 
 ozd_status_t ozd_create(ozd_handle_t* h, cudaStream_t stream);

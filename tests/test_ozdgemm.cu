@@ -32,11 +32,12 @@ struct Case {
     int64_t pad = 0;           // extra leading-dimension padding
     size_t max_ws = 0;         // 0 = default
     double tol = -1;           // >= 0: adaptive moduli with this tolerance (0 = DGEMM-level)
+    int expect_level = -1;     // >= 0: must be emulated after this |A||B| bound level
 };
 
 struct Result {
     double err_nw = 0, err_cw = 0, nat_cw = 0, bound_ratio = 0, tol_ratio = 0;
-    int path = -1, reason = 0, blocks = 0, moduli = 0, log2_ratio = 0;
+    int path = -1, reason = 0, blocks = 0, moduli = 0, log2_ratio = 0, level = 0;
     bool nan_ok = true;
 };
 
@@ -117,6 +118,7 @@ Result run(const Case& c, std::vector<double>* out_C = nullptr) {
     r.blocks = info.col_blocks;
     r.moduli = info.moduli;
     r.log2_ratio = info.log2_ratio;
+    r.level = info.estimate_level;
     const double u = std::ldexp(1.0, -53);
     const double tol = c.tol == 0 ? k * u : c.tol;
     const int P = ozd_scale_bits(info.path == 1 ? info.moduli : 16);
@@ -194,15 +196,15 @@ int dispatch_checks() {
 }
 
 int adaptive_sweep() {
-    std::printf("gen,m,n,k,tol,path,reason,moduli,log2_ratio,emu_cw,nat_cw,err_over_tol\n");
+    std::printf("gen,m,n,k,tol,path,reason,moduli,log2_ratio,emu_cw,nat_cw,err_over_tol,level\n");
     for (const char* gen : {"uniform", "phi0.5", "phi1", "phi2", "phi4", "rowscale"})
         for (double tol : {0.0, 1e-15, 1e-12, 1e-9, 1e-6, 1e-3})
             for (int64_t k : {256, 1024, 4096}) {
                 Case c{"adapt", 1024, 1024, k, 0, 0, gen, 1.0, 0.0, 0, 0, 0, tol};
                 Result r = run(c);
-                std::printf("%s,%ld,%ld,%ld,%.0e,%d,%d,%d,%d,%.3e,%.3e,%.3f\n", gen, (long)c.m,
+                std::printf("%s,%ld,%ld,%ld,%.0e,%d,%d,%d,%d,%.3e,%.3e,%.3f,%d\n", gen, (long)c.m,
                             (long)c.n, (long)k, tol, r.path, r.reason, r.moduli, r.log2_ratio,
-                            r.err_cw, r.nat_cw, r.tol_ratio);
+                            r.err_cw, r.nat_cw, r.tol_ratio, r.level);
             }
     return 0;
 }
@@ -234,7 +236,7 @@ int suite() {
         {"nan-input",         128,  128,  128, 0, 0, "nan",        1.0,  0.0, 14},
         {"inf-input",         128,  128,  128, 0, 0, "inf",        1.0,  0.0, 14},
         // adaptive moduli: tol 0 = native DGEMM's worst-case bound k*2^-53
-        {"adapt-uniform",    1024, 1024, 1024, 0, 0, "uniform",    1.0,  0.0,  0, 0, 0, 0.0},
+        {"adapt-uniform",    1024, 1024, 1024, 0, 0, "uniform",    1.0,  0.0,  0, 0, 0, 0.0, 1},
         {"adapt-hpl-beta",   2048, 2048, 1024, 0, 0, "uniform",   -1.0,  1.0,  0, 0, 0, 0.0},
         {"adapt-phi0.5",      512,  512,  512, 0, 0, "phi0.5",     1.0,  0.0,  0, 0, 0, 0.0},
         {"adapt-phi2",        512,  512,  512, 0, 0, "phi2",       1.0,  0.0,  0, 0, 0, 0.0},
@@ -244,9 +246,13 @@ int suite() {
         {"adapt-tol1e-6",    1024, 1024, 1024, 0, 0, "uniform",    1.0,  0.0,  0, 0, 0, 1e-6},
         {"adapt-tol1e-10",   1024, 1024, 1024, 0, 1, "phi2",       1.0,  0.0,  0, 0, 0, 1e-10},
         {"adapt-blocked",    1024, 1024,  512, 0, 0, "phi0.5",     1.0,  0.0,  0, 0, 24u << 20, 0.0},
+        // level 2 (two-band |A||B| bound) for wide exponent ranges
+        {"adapt2-phi2-1e-6", 1024, 1024, 1024, 0, 0, "phi2",       1.0,  0.0,  0, 0, 0, 1e-6, 2},
+        {"adapt2-phi2-1e-8", 1024, 1024, 1024, 1, 1, "phi2",       1.0,  0.5,  0, 0, 0, 1e-8},
+        {"adapt2-blocked",   1024, 1024,  512, 0, 0, "phi2",       1.0,  0.0,  0, 0, 24u << 20, 1e-6, 2},
     };
     int fails = 0;
-    std::printf("%-18s %5s %5s %6s %3s %4s | %9s %9s %9s | %8s %8s %5s %s\n", "case", "m", "n",
+    std::printf("%-18s %5s %5s %6s %3s %4s | %9s %9s %9s | %8s %8s %6s %s\n", "case", "m", "n",
                 "k", "op", "mod", "emu_cw", "nat_cw", "emu_nw", "err/bnd", "err/tol", "path",
                 "result");
     for (const auto& c : cases) {
@@ -259,12 +265,13 @@ int suite() {
                               (r.path == 0 && r.reason == OZD_FALLBACK_ACCURACY));
         else ok = r.path == 1 && r.bound_ratio <= 1.0 && r.nan_ok;
         if (c.max_ws) ok = ok && r.blocks > 1;
+        if (c.expect_level >= 0) ok = ok && r.path == 1 && r.level == c.expect_level;
         fails += !ok;
         char op[3] = {c.ta ? 'T' : 'N', c.tb ? 'T' : 'N', 0};
         char path[16];
-        if (r.path == 1) std::snprintf(path, sizeof path, "emu");
+        if (r.path == 1) std::snprintf(path, sizeof path, r.level ? "emu/L%d" : "emu", r.level);
         else std::snprintf(path, sizeof path, "nat/%d", r.reason);
-        std::printf("%-18s %5ld %5ld %6ld %3s %4d | %9.2e %9.2e %9.2e | %8.3f %8.3f %5s %s\n",
+        std::printf("%-18s %5ld %5ld %6ld %3s %4d | %9.2e %9.2e %9.2e | %8.3f %8.3f %6s %s\n",
                     c.name, (long)c.m, (long)c.n, (long)c.k, op, r.moduli, r.err_cw, r.nat_cw,
                     r.err_nw, r.bound_ratio, r.tol_ratio, path, ok ? "PASS" : "FAIL");
     }

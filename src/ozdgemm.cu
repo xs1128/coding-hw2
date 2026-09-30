@@ -250,10 +250,13 @@ __device__ __forceinline__ void write_residues(const double* val4, int8_t* o, in
 // so the read is coalesced for either stride; each thread then writes 4
 // consecutive residues as one 32-bit store.
 //
-// ABS mode instead writes a single slab of floor(|x| * 2^(6 - amax[v])), a
-// value in [0, 127] that never exceeds |x| * 2^(6 - amax[v]); the INT8 GEMM of
-// two such slabs is a lower bound on |A||B| (used to pick the moduli count).
-template <bool ABS>
+// The |x| modes quantize s = |x| * 2^(6 - amax[v]), s in [0, 128), for the
+// |A||B| lower bound that picks the moduli count:
+//   MODE 1 (level 1): one slab of h = floor(s);
+//   MODE 2 (level 2): h, and in the next slab l = floor((s - h) * 128).
+// h, s - h and l are exact, all in [0, 127], and s >= h + l/128, so INT8 GEMMs
+// of these slabs give lower bounds on |A||B|.
+template <int MODE>
 __global__ void convert(const double* __restrict__ X, int64_t sv, int64_t sl,
                         int64_t v0, int64_t nvec, int64_t len, int64_t kp,
                         const VecExp* __restrict__ e, int8_t* __restrict__ out,
@@ -269,7 +272,7 @@ __global__ void convert(const double* __restrict__ X, int64_t sv, int64_t sl,
         if (v < nvec && l < len) {
             const double a = X[(v0 + v) * sv + l * sl];
             const VecExp ev = e[v0 + v];
-            val = ABS ? floor(ldexp(fabs(a), 6 - ev.amax)) : trunc(ldexp(a, scale_exp(ev.norm)));
+            val = MODE ? ldexp(fabs(a), 6 - ev.amax) : trunc(ldexp(a, scale_exp(ev.norm)));
         }
         tile[vi][li] = val;
     }
@@ -278,11 +281,16 @@ __global__ void convert(const double* __restrict__ X, int64_t sv, int64_t sl,
     const int r = tid >> 3, lg = (tid & 7) * 4;
     const int64_t v = vb + r, l = lb + lg;
     if (v >= nvec || l >= kp) return;  // kp % 16 == 0, so l+3 < kp too
-    if constexpr (ABS) {
-        uint32_t packed = 0;
+    if constexpr (MODE > 0) {
+        uint32_t hi = 0, lo = 0;
 #pragma unroll
-        for (int u = 0; u < 4; ++u) packed |= (uint32_t)tile[r][lg + u] << (8 * u);
-        *reinterpret_cast<uint32_t*>(out + v * kp + l) = packed;
+        for (int u = 0; u < 4; ++u) {
+            const double x = tile[r][lg + u], h = floor(x);
+            hi |= (uint32_t)h << (8 * u);
+            lo |= (uint32_t)floor((x - h) * 128.0) << (8 * u);
+        }
+        *reinterpret_cast<uint32_t*>(out + v * kp + l) = hi;
+        if (MODE == 2) *reinterpret_cast<uint32_t*>(out + slab + v * kp + l) = lo;
     } else {
         write_residues(&tile[r][lg], out + v * kp + l, slab);
     }
@@ -360,15 +368,20 @@ __global__ void crt(const int32_t* __restrict__ C32, int64_t slab, int64_t mp,
     }
 }
 
-// For the lower bound G = floor|A| * floor|B| (INT8 GEMM of ABS-mode slabs),
-// computes max over entries of an upper bound on
+// Computes the max over entries of an upper bound on
 //   log2( ||A_i|| * ||B_j|| / (|A||B|)_ij ),
-// using ||A_i|| < 2^(norm+1) and (|A||B|)_ij >= G_ij * 2^(amaxA + amaxB - 12).
+// using ||A_i|| < 2^(norm+1) and a lower bound on (|A||B|)_ij from the INT8
+// GEMMs of the quantized |A|, |B| slabs (convert MODE 1/2):
+//   LEVEL 1: G = hh,                          |A||B| >= G * 2^(amaxA + amaxB - 12)
+//   LEVEL 2: G = hh*2^14 + (hl + lh)*2^7 + ll, |A||B| >= G * 2^(amaxA + amaxB - 26)
+// with the four products in consecutive slabs of G (hh, hl, lh, ll), summed in
+// 64 bits because hl + lh alone can exceed INT32 near kMaxK.
 // Entries with a zero row/column need no accuracy (their result is exact);
 // entries with G_ij == 0 get kNoBound (the bound is unusable there).
 constexpr int kNoBound = 1 << 20;
 
-__global__ void ratio_bound(const int32_t* __restrict__ G, int64_t mp, int64_t m,
+template <int LEVEL>
+__global__ void ratio_bound(const int32_t* __restrict__ G, int64_t slab, int64_t mp, int64_t m,
                             int64_t nb, int64_t j0, const VecExp* __restrict__ eA,
                             const VecExp* __restrict__ eB, int* __restrict__ out) {
     const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -378,8 +391,13 @@ __global__ void ratio_bound(const int32_t* __restrict__ G, int64_t mp, int64_t m
         for (int64_t j = blockIdx.y; j < nb; j += gridDim.y) {
             const VecExp b = eB[j0 + j];
             if (a.norm == kZeroVec || b.norm == kZeroVec) continue;
-            const int32_t g = G[i + j * mp];
-            const int t = g > 0 ? a.norm + b.norm + 14 - a.amax - b.amax - (31 - __clz(g))
+            const int64_t o = i + j * mp;
+            uint64_t g = (uint32_t)G[o];
+            if (LEVEL == 2)
+                g = (g << 14) + (((uint64_t)(uint32_t)G[o + slab] + (uint32_t)G[o + 2 * slab]) << 7) +
+                    (uint32_t)G[o + 3 * slab];
+            const int shift = LEVEL == 2 ? 28 : 14;
+            const int t = g > 0 ? a.norm + b.norm + shift - a.amax - b.amax - (63 - __clzll(g))
                                 : kNoBound;
             best = max(best, t);
         }
@@ -484,6 +502,13 @@ double pred_emu_ms(const ozd_cost_model_t& c, double m, double n, double kp, int
     if (estimate)
         t += (m + n) * kp * 9 / (c.convert_gbs * 1e6) + gemm1 + 4 * m * n / (c.crt_gbs * 1e6);
     return t;
+}
+
+// Level-2 bound pass: two |x| slabs per operand, four INT8 GEMMs, 16 bytes
+// of INT32 products read per output entry.
+double pred_level2_ms(const ozd_cost_model_t& c, double m, double n, double kp) {
+    const double gemm1 = 2 * m * n * kp / (c.int8_tops * 1e9) + 4 * m * n / (c.gemm_out_gbs * 1e6);
+    return (m + n) * kp * 10 / (c.convert_gbs * 1e6) + 4 * gemm1 + 16 * m * n / (c.crt_gbs * 1e6);
 }
 
 struct Layout {
@@ -681,7 +706,8 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
     // even in the best case log2_ratio = 0; refined after the bound pass.
     const bool adaptive = h->tol >= 0;
     const double tol = h->tol == 0 ? std::ldexp((double)k, -53) : h->tol;
-    int nmod = adaptive ? moduli_for_bits(bits_needed(0, k, tol)) : h->moduli;
+    const int nmod_min = adaptive ? moduli_for_bits(bits_needed(0, k, tol)) : h->moduli;
+    int nmod = nmod_min;
     if (nmod == 0) return fallback(OZD_FALLBACK_ACCURACY);
 
     const int64_t kp = round_up(k, kPadK);
@@ -730,15 +756,15 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
     if (adaptive) {
         // Lower bound of |A||B| via one INT8 GEMM of floor-quantized |A|, |B|.
         nvtxRangePushA("ozd:estimate");
-        convert<true><<<convert_grid(kp, m), cblk, 0, st>>>(A, svA, slA, 0, m, k, kp, eA, A8, 0);
+        convert<1><<<convert_grid(kp, m), cblk, 0, st>>>(A, svA, slA, 0, m, k, kp, eA, A8, 0);
         for (int64_t j0 = 0; j0 < n; j0 += L.nb) {
             const int64_t nb = std::min(L.nb, n - j0);
-            convert<true><<<convert_grid(kp, nb), cblk, 0, st>>>(B, svB, slB, j0, nb, k, kp, eB, B8, 0);
+            convert<1><<<convert_grid(kp, nb), cblk, 0, st>>>(B, svB, slB, j0, nb, k, kp, eB, B8, 0);
             OZD_CUBLAS(cublasGemmEx_64(h->cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, nb, kp, &one,
                                        A8, CUDA_R_8I, kp, B8, CUDA_R_8I, kp, &zero, C32,
                                        CUDA_R_32I, L.mp, CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT));
             const dim3 g((unsigned)((m + 255) / 256), (unsigned)std::min<int64_t>(nb, 4096));
-            ratio_bound<<<g, 256, 0, st>>>(C32, L.mp, m, nb, j0, eA, eB, flag + 1);
+            ratio_bound<1><<<g, 256, 0, st>>>(C32, 0, L.mp, m, nb, j0, eA, eB, flag + 1);
         }
         OZD_CUDA(cudaGetLastError());
         nvtxRangePop();
@@ -752,9 +778,51 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
         if (h->h_flag[0]) return fallback(OZD_FALLBACK_NONFINITE);
     }
     if (adaptive) {
-        const int lr = std::max(h->h_flag[1], 0);  // the ratio is >= 1 by Cauchy-Schwarz
-        h->info.log2_ratio = lr;
+        // The ratio is >= 1 by Cauchy-Schwarz, so clamp the bound at 0.
+        int lr = std::max(h->h_flag[1], 0);
+        h->info.estimate_level = 1;
         nmod = lr >= kNoBound ? 0 : moduli_for_bits(bits_needed(lr, k, tol));
+        if (nmod == 0) {
+            // Level 1 cannot certify any count (wide exponent range: some
+            // lower bounds round to 0, or are too loose). Try the finer
+            // two-band bound, unless AUTO predicts native wins even with the
+            // fewest moduli the tolerance allows.
+            if (auto_bk && pred_emu_ms(h->model, m, n, kp, nmod_min, beta != 0, false) +
+                                   pred_level2_ms(h->model, m, n, kp) >=
+                               h->info.pred_native_ms) {
+                h->info.log2_ratio = lr;
+                return fallback(OZD_FALLBACK_DISPATCH);
+            }
+            nvtxRangePushA("ozd:estimate2");
+            OZD_CUDA(cudaMemsetAsync(flag + 1, 0x80, sizeof(int), st));
+            const int64_t sA = m * kp;
+            convert<2><<<convert_grid(kp, m), cblk, 0, st>>>(A, svA, slA, 0, m, k, kp, eA, A8, sA);
+            for (int64_t j0 = 0; j0 < n; j0 += L.nb) {
+                const int64_t nb = std::min(L.nb, n - j0);
+                const int64_t sB = nb * kp, sC = L.mp * nb;
+                convert<2><<<convert_grid(kp, nb), cblk, 0, st>>>(B, svB, slB, j0, nb, k, kp, eB, B8, sB);
+                // C32 slabs: hh, hl, lh, ll
+                const int8_t* xa[4] = {A8, A8, A8 + sA, A8 + sA};
+                const int8_t* xb[4] = {B8, B8 + sB, B8, B8 + sB};
+                for (int q = 0; q < 4; ++q)
+                    OZD_CUBLAS(cublasGemmEx_64(h->cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, nb, kp, &one,
+                                               xa[q], CUDA_R_8I, kp, xb[q], CUDA_R_8I, kp, &zero,
+                                               C32 + q * sC, CUDA_R_32I, L.mp, CUBLAS_COMPUTE_32I,
+                                               CUBLAS_GEMM_DEFAULT));
+                const dim3 g((unsigned)((m + 255) / 256), (unsigned)std::min<int64_t>(nb, 4096));
+                ratio_bound<2><<<g, 256, 0, st>>>(C32, sC, L.mp, m, nb, j0, eA, eB, flag + 1);
+            }
+            OZD_CUDA(cudaGetLastError());
+            publish_flags<<<1, 32, 0, st>>>(flag, h->d_hflag);
+            OZD_CUDA(cudaGetLastError());
+            OZD_CUDA(cudaStreamSynchronize(st));
+            nvtxRangePop();
+            h->info.t_estimate_ms += tm.lap();
+            lr = std::max(h->h_flag[1], 0);
+            h->info.estimate_level = 2;
+            nmod = lr >= kNoBound ? 0 : moduli_for_bits(bits_needed(lr, k, tol));
+        }
+        h->info.log2_ratio = lr;
         if (nmod == 0) return fallback(OZD_FALLBACK_ACCURACY);
         h->info.pred_emu_ms = pred_emu_ms(h->model, m, n, kp, nmod, beta != 0, false);
         if (auto_bk && h->info.pred_emu_ms >= h->info.pred_native_ms)
@@ -764,7 +832,7 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
 
     nvtxRangePushA("ozd:convertA");
     const int64_t slabA = m * kp;
-    convert<false><<<convert_grid(kp, m), cblk, 0, st>>>(A, svA, slA, 0, m, k, kp, eA, A8, slabA);
+    convert<0><<<convert_grid(kp, m), cblk, 0, st>>>(A, svA, slA, 0, m, k, kp, eA, A8, slabA);
     OZD_CUDA(cudaGetLastError());
     nvtxRangePop();
     h->info.t_convert_ms += tm.lap();
@@ -775,7 +843,7 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
         const int64_t slabB = nb * kp, slabC = L.mp * nb;
 
         nvtxRangePushA("ozd:convertB");
-        convert<false><<<convert_grid(kp, nb), cblk, 0, st>>>(B, svB, slB, j0, nb, k, kp, eB, B8, slabB);
+        convert<0><<<convert_grid(kp, nb), cblk, 0, st>>>(B, svB, slB, j0, nb, k, kp, eB, B8, slabB);
         OZD_CUDA(cudaGetLastError());
         nvtxRangePop();
         h->info.t_convert_ms += tm.lap();

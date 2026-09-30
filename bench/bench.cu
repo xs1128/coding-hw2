@@ -8,6 +8,7 @@
 // Usage: bench [--preset square|hpl|skinny|all] [--shape m,n,k]...
 //              [--moduli 14[,11,...]] [--tol 0[,1e-6,...]] [--auto]
 //              [--reps 10] [--warmup 3] [--no-native] [--breakdown] [--nosafety]
+//              [--gen uniform|phi<x>|rowscale]
 //   --moduli  fixed-moduli emulated runs
 //   --tol     adaptive-moduli emulated runs (0 = DGEMM-level tolerance)
 //   --auto    also run every configuration above through OZD_BACKEND_AUTO
@@ -44,6 +45,7 @@ int main(int argc, char** argv) {
     std::vector<double> tols;
     int reps = 10, warmup = 3;
     bool native = true, breakdown = false, safety = true, with_auto = false;
+    std::string gen = "uniform";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() { return std::string(i + 1 < argc ? argv[++i] : ""); };
@@ -67,6 +69,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-native") native = false;
         else if (a == "--breakdown") breakdown = true;
         else if (a == "--nosafety") safety = false;
+        else if (a == "--gen") gen = next();
         else { std::fprintf(stderr, "unknown arg %s\n", a.c_str()); return 2; }
     }
     if (shapes.empty()) shapes = preset("square");
@@ -90,11 +93,11 @@ int main(int argc, char** argv) {
 
     std::printf("host,gpu,backend,moduli,m,n,k,median_ms,min_ms,tflops_median,col_blocks,"
                 "scale_ms,convert_ms,gemm_ms,reduce_ms,crt_ms,tol,path,used_moduli,fallback,"
-                "pred_native_ms,pred_emu_ms,estimate_ms\n");
+                "pred_native_ms,pred_emu_ms,estimate_ms,estimate_level,gen\n");
     for (const auto& s : shapes) {
         std::vector<double> A, B;
-        fill(A, s.m, s.k, s.m, Gen::parse("uniform"), 1, true);
-        fill(B, s.k, s.n, s.k, Gen::parse("uniform"), 2, false);
+        fill(A, s.m, s.k, s.m, Gen::parse(gen), 1, true);
+        fill(B, s.k, s.n, s.k, Gen::parse(gen), 2, false);
         double *dA, *dB, *dC;
         CK(cudaMalloc(&dA, A.size() * 8));
         CK(cudaMalloc(&dB, B.size() * 8));
@@ -152,12 +155,12 @@ int main(int argc, char** argv) {
             const std::string label = bk == OZD_BACKEND_NATIVE ? (post ? "native_post" : "native")
                                       : std::string(bk == OZD_BACKEND_AUTO ? "auto_" : "emu_") + ozd_version();
             std::printf("%s,%s,%s,%d,%ld,%ld,%ld,%.4f,%.4f,%.2f,%d,%.4f,%.4f,%.4f,%.4f,%.4f,"
-                        "%g,%d,%d,%d,%.4f,%.4f,%.4f\n",
+                        "%g,%d,%d,%d,%.4f,%.4f,%.4f,%d,%s\n",
                         host, gpu.c_str(), label.c_str(), md, (long)s.m, (long)s.n, (long)s.k, med,
                         mn, tf, info.col_blocks, info.t_scale_ms, info.t_convert_ms, info.t_gemm_ms,
                         info.t_reduce_ms, info.t_crt_ms, tol, info.path, info.moduli,
                         info.fallback_reason, info.pred_native_ms, info.pred_emu_ms,
-                        info.t_estimate_ms);
+                        info.t_estimate_ms, info.estimate_level, gen.c_str());
             std::fflush(stdout);
         }
         cudaFree(dA); cudaFree(dB); cudaFree(dC);
