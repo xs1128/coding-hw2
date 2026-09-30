@@ -511,6 +511,12 @@ double pred_level2_ms(const ozd_cost_model_t& c, double m, double n, double kp) 
     return (m + n) * kp * 10 / (c.convert_gbs * 1e6) + 4 * gemm1 + 16 * m * n / (c.crt_gbs * 1e6);
 }
 
+// Per-modulus GEMM loop vs one strided-batched call (job 466399, H200,
+// cuBLAS 13.2, loop/batched speed at 14 moduli): 16384^3 1.20, 8192^3 1.10,
+// 4096^3 1.15, 32768^2x1024 and 8192^2x1024 1.00, 16384^2x256 0.96,
+// 16384x256x16384 0.93, 1024^3 0.70.
+constexpr int64_t kLoopMinK = 2048, kLoopMinMN = 1024;
+
 struct Layout {
     int64_t kp, mp, nb;
     size_t  off_eA, off_eB, off_flag, off_A8, off_B8, off_C32, total;
@@ -849,14 +855,23 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
         h->info.t_convert_ms += tm.lap();
 
         nvtxRangePushA("ozd:gemm");
-        // One GEMM per modulus rather than one strided-batched call: for the
-        // batched call cuBLAS 13.2 picks a 64x128 tile on sm_90, the single
-        // call a 128x256 one (21% faster per GEMM at 16384^3, Nsight 461398).
-        for (int t = 0; t < nmod; ++t)
-            OZD_CUBLAS(cublasGemmEx_64(h->cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, nb, kp, &one,
-                                       A8 + t * slabA, CUDA_R_8I, kp, B8 + t * slabB, CUDA_R_8I,
-                                       kp, &zero, C32 + t * slabC, CUDA_R_32I, L.mp,
-                                       CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT));
+        // Large k: one GEMM per modulus. For a strided-batched call cuBLAS
+        // 13.2 picks a 64x128 tile on sm_90, for a single call a 128x256 one
+        // (3.27 vs 3.95 ms per 16384x8192x16384 GEMM, Nsight 461398). Small
+        // problems keep the batched call, which saves nmod-1 launches.
+        // Measured in job 466399 (see kLoopMinK).
+        if (kp >= kLoopMinK && std::min(m, nb) >= kLoopMinMN) {
+            for (int t = 0; t < nmod; ++t)
+                OZD_CUBLAS(cublasGemmEx_64(h->cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, nb, kp, &one,
+                                           A8 + t * slabA, CUDA_R_8I, kp, B8 + t * slabB,
+                                           CUDA_R_8I, kp, &zero, C32 + t * slabC, CUDA_R_32I,
+                                           L.mp, CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT));
+        } else {
+            OZD_CUBLAS(cublasGemmStridedBatchedEx_64(
+                h->cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, nb, kp, &one, A8, CUDA_R_8I, kp,
+                slabA, B8, CUDA_R_8I, kp, slabB, &zero, C32, CUDA_R_32I, L.mp, slabC, nmod,
+                CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT));
+        }
         nvtxRangePop();
         h->info.t_gemm_ms += tm.lap();
 
