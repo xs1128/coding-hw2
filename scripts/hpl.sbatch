@@ -2,7 +2,9 @@
 # netlib HPL 2.3 with the ozdgemm DGEMM hook, 1 rank / 1 GPU.
 #   sbatch scripts/hpl.sbatch
 #   N=20000 NB=512 CONFIGS="cpu native emu:14 emu:11" sbatch scripts/hpl.sbatch
-# CONFIGS entries: cpu | native | emu:<moduli> | auto:<moduli> | tol:<tol> | autotol:<tol>
+# CONFIGS entries: cpu | native | emu:<moduli> | auto:<moduli> | tol:<tol> | autotol:<tol>,
+# optionally followed by ,VAR=value shim settings (HPL_OZD_ prefix implied),
+# e.g. "native,PIPE=0 native emu:14,CHUNK=1024"
 # Results: results/<jobid>/hpl-<config>.out and summary.csv
 #SBATCH --account=ACD110018
 #SBATCH --job-name=ozd-hpl
@@ -34,8 +36,11 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-16}
 } | tee "$OUT/env.txt"
 
 for cfg in $CONFIGS; do
-  mode=${cfg%%:*}; arg=${cfg#*:}; [[ "$arg" == "$cfg" ]] && arg=""
-  unset HPL_OZD_MODULI HPL_OZD_TOL
+  IFS=, read -r -a parts <<< "$cfg"
+  base=${parts[0]}
+  mode=${base%%:*}; arg=${base#*:}; [[ "$arg" == "$base" ]] && arg=""
+  unset HPL_OZD_MODULI HPL_OZD_TOL HPL_OZD_PIPE HPL_OZD_CHUNK
+  for kv in "${parts[@]:1}"; do export "HPL_OZD_$kv"; done
   case $mode in
     cpu|native) export HPL_OZD_MODE=$mode ;;
     emu|auto)   export HPL_OZD_MODE=$mode HPL_OZD_MODULI=$arg ;;
@@ -43,7 +48,8 @@ for cfg in $CONFIGS; do
     autotol)    export HPL_OZD_MODE=auto HPL_OZD_TOL=$arg ;;
     *) echo "bad config $cfg"; exit 1 ;;
   esac
-  RUN=$OUT/run-${cfg//:/-}
+  name=${cfg//:/-}; name=${name//,/_}; name=${name//=/}
+  RUN=$OUT/run-$name
   mkdir -p "$RUN" && cd "$RUN"
   cat > HPL.dat <<DAT
 HPLinpack benchmark input file
@@ -78,7 +84,7 @@ $NB          NBs
 1            Equilibration (0=no,1=yes)
 8            memory alignment in double (> 0)
 DAT
-  log=$OUT/hpl-${cfg//:/-}.out
+  log=$OUT/hpl-$name.out
   "$OPAL_PREFIX/bin/mpirun" -np 1 --bind-to none "$REPO/build/xhpl" > "$log" 2>&1 || echo "xhpl exited $?" >> "$log"
   cd "$REPO"
 done
