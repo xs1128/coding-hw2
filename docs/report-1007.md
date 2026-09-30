@@ -49,20 +49,25 @@ accuracy. The error bound is
 | v0 baseline | `v0-baseline` | Straightforward implementation: separate scale, convert, per-modulus GEMM, reduce, CRT, all in floating point |
 | v1 optimized | `7db8259`, `05007ab` | One-pass scaling; tiled convert with packed stores; batched GEMM; fused reduce + CRT; integer CRT with magic-number division |
 | v2 adaptive | `680967f` | Adaptive moduli count, AUTO dispatcher, column blocking under a workspace cap |
+| final | `f4537d7`, `ef7e39b` | Plus: two-band adaptive bound; one GEMM per modulus for large k (cuBLAS picks a faster tile than for the batched call); refit cost model |
 
-**Speedup over cuBLAS DGEMM (same node, job 461398, median of 10 runs):**
+**Speedup over cuBLAS DGEMM (same node, job 466571, median of 10 runs):**
 
-| Shape (m×n×k) | native ms | v0 (14) | v2 (14) | v2 (11) | v2 (8) |
+| Shape (m×n×k) | native ms | v0 (14) | final (14) | final (11) | final (8) |
 |---|---:|---:|---:|---:|---:|
-| 16384³ | 163.6 | 167.5 → **0.98×** | 133.5 → **1.23×** | 104.8 → 1.56× | 76.9 → 2.13× |
-| 8192³ | 19.3 | — | 18.4 → 1.05× | 14.7 → 1.32× | 11.3 → 1.71× |
-| 4096³ | 2.24 | — | 3.07 → 0.73× | 2.46 → 0.91× | 1.82 → 1.23× |
-| 32768²×1024 (HPL update) | 39.6 | 97.1 → **0.41×** | 67.1 → **0.59×** | 56.7 → 0.70× | 37.6 → 1.05× |
-| 16384²×256 | 2.47 | — | 11.3 → 0.22× | 10.3 → 0.24× | 6.24 → 0.40× |
+| 16384³ | 163.4 | 166.9 → **0.98×** | 108.6 → **1.51×** | 88.5 → 1.85× | 71.2 → 2.30× |
+| 8192³ | 19.5 | 28.8 → 0.68× | 16.5 → 1.18× | 13.3 → 1.46× | 9.81 → 1.98× |
+| 4096³ | 2.26 | 7.11 → 0.32× | 2.60 → 0.87× | 2.11 → 1.07× | 1.59 → 1.43× |
+| 32768²×1024 (HPL update) | 39.7 | 97.1 → **0.41×** | 67.4 → **0.59×** | 56.8 → 0.70× | 37.8 → 1.05× |
+| 16384²×256 | 2.50 | 19.4 → 0.13× | 11.2 → 0.22× | 10.3 → 0.24× | 6.25 → 0.40× |
+
+(The first draft of this table, job 461398, showed v2 at 1.23× for 16384³;
+the per-modulus GEMM change took it to 1.51×.)
 
 - 14 moduli is the count that matches DGEMM accuracy on well-conditioned
   data. 11 moduli is the smallest count that passes HPL (§4).
-- Emulation wins only when k is large, roughly k ≳ 8192 with 14 moduli.
+- Emulation wins only when k is large, roughly k ≳ 8192 with 14 moduli
+  (k ≳ 4096 with 11).
 - Native was re-timed at the end of each shape (`native_post`). It drifted
   up to 7% slower, so the speedups above are conservative.
 
@@ -191,7 +196,7 @@ With it, emulated GEMM time matches a run with the check disabled (2.79 vs.
 - **Conclusion:** once overlapped, HPL on this setup is PCIe-bound. The
   moduli count only changes the residual (all four pass).
 
-## 5. Profiling (Nsight Systems, job 461398)
+## 5. Profiling (Nsight Systems, jobs 461398 and 466571)
 
 **HPL shape 32768²×1024, 14 moduli, per call:**
 
@@ -205,13 +210,13 @@ With it, emulated GEMM time matches a run with the check disabled (2.79 vs.
 
 **16384³, adaptive tol = 0, per call:**
 
-| Kernel | ms |
-|---|---:|
-| INT8 GEMM | 110.7 |
-| Convert | 13.1 |
-| CRT | 8.7 |
-| Estimate pass (abs convert + INT8 GEMM + ratio) | 12.1 (8%) |
-| **Total** | **~146** (native 159) |
+| Kernel | Before the GEMM change (461398) | After (466571) |
+|---|---:|---:|
+| INT8 GEMMs (moduli + estimate) | 117.2 | 97.6 |
+| Convert | 13.1 | 13.1 |
+| CRT | 8.7 | 9.0 |
+| Rest of the estimate pass (abs convert + ratio) | 5.6 | 5.5 |
+| **Total** | **~146** | **~127** (native 158) |
 
 **Bottleneck.** At small k, the INT32 intermediate is the whole problem:
 - N·m·n·4 bytes are written by the GEMM and read back by the CRT.
@@ -219,21 +224,22 @@ With it, emulated GEMM time matches a run with the check disabled (2.79 vs.
 
 At large k the INT8 GEMM dominates, which is the regime where emulation wins.
 
-**Ceiling on this GPU.** Both GEMMs were measured at 16384³ (Nsight):
-- The INT8 GEMM reaches 1,112 TOPS, and native DGEMM reaches 55.3 TFLOPS.
-- INT8 is therefore only **20×** faster than FP64 here.
+**Ceiling on this GPU.** Both GEMMs were measured at 16384³ (Nsight, job
+466571, after the per-modulus GEMM change):
+- The INT8 GEMM reaches ~1,350 TOPS, and native DGEMM reaches ~56 TFLOPS.
+- INT8 is therefore only **~24×** faster than FP64 here.
 
 With N moduli, emulation runs N INT8 GEMMs. Even with free conversion and
-CRT, its speedup is at most 20/N:
+CRT, its speedup is at most 24/N:
 
 | Moduli | Ceiling | Measured at 16384³ | Share of ceiling |
 |---|---:|---:|---:|
-| 14 | 1.44× | 1.23× | 85% |
-| 11 | 1.83× | 1.56× | 85% |
-| 8 | 2.51× | 2.13× | 85% |
+| 14 | 1.72× | 1.51× | 88% |
+| 11 | 2.19× | 1.85× | 84% |
+| 8 | 3.01× | 2.30× | 76% |
 
-Emulation is therefore within 15% of the best any INT8 scheme can do on an
-H200. Where it loses to native, the reason is that H200 FP64 is strong, not
+Emulation is therefore within 12–24% of the best any INT8 scheme can do on
+an H200. Where it loses to native, the reason is that H200 FP64 is strong, not
 that the implementation is slow.
 
 ## 6. Current problems
@@ -308,6 +314,12 @@ It stays optional.
 - The v1 vs. v2 A/B: no regression (§6).
 - The two-band (level-2) adaptive bound (§3, §6).
 - HPL with 11–12 moduli under overlap: no change, PCIe-bound (§4).
+- One INT8 GEMM per modulus for large k: the stage breakdown showed v1's
+  batched GEMM 15% slower than v0's, and Nsight showed cuBLAS choosing a
+  smaller tile for batched calls. 16384³ went from 1.23× to 1.51× (A/B job
+  466399; the shape rule keeps the batched call where the loop loses).
+- HPL shim allocates everything before the timed solve (`late_allocs=0`,
+  job 466542).
 
 **Remaining:**
 1. **Final report and README.** Add the failure cases, the applicable scope

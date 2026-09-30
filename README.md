@@ -50,7 +50,10 @@ the reason code tells the caller.
    is then an integer matrix and `|A'B'|_ij < 2^(2P) <= M/4` by Cauchy–Schwarz.
 2. For pairwise coprime moduli `m_t ∈ {256, 255, 253, 251, 247, ...}` compute
    `A' mod m_t` and `B' mod m_t` as int8 (symmetric range).
-3. One INT8 GEMM (INT32 accumulate, exact) per modulus.
+3. One INT8 GEMM (INT32 accumulate, exact) per modulus. For `k >= 2048` and
+   `m, n >= 1024` these are separate cuBLAS calls (cuBLAS picks a faster
+   128x256 tile than for a batched call, 1.1-1.2x); smaller problems use one
+   strided-batched call to save launches (job 466399).
 4. Reduce each INT32 result mod `m_t` (integer magic-number division, fused
    into the CRT kernel).
 5. CRT: `X = Σ c_t S_t mod M` with `S_t = M_t (M_t^-1 mod m_t)`. `S_t` is split
@@ -118,18 +121,21 @@ from `(m, n, k, moduli)`; the call takes the faster path. When emulation
 cannot win even with the fewest admissible moduli the decision is made before
 any work, so native calls pay nothing extra. Constants are fitted from
 benchmark CSVs by `scripts/fit_model.py` (least squares on relative error)
-and can be replaced with `ozd_set_cost_model`. Defaults come from job 441237:
-worst prediction error 17%, 63/63 decisions correct on that grid.
+and can be replaced with `ozd_set_cost_model`. Defaults come from job 466503:
+worst prediction error 16%, 63/63 decisions correct on that grid.
 
 ## HPL integration
 
-netlib HPL 2.3 (tarball in `third_party/`, unmodified except a 3-line patch)
+netlib HPL 2.3 (tarball in `third_party/`, unmodified except a small patch)
 is built with `-DHPL_CALL_CBLAS`, and a link-time shim (`hpl/ozd_shim.cu`)
 defines `cblas_dgemm`. Updates with `M, N >= 1024` and `K >= 128` go to the GPU
 through `ozd_dgemm`; smaller calls stay on the CPU BLAS (OpenBLAS). HPL keeps
 its matrix in host memory, so every offloaded update copies A, B and C over
-PCIe. The patch (`hpl/hpl-ozd.patch`) page-locks HPL's matrix so those copies
-run at full PCIe speed.
+PCIe. The patch (`hpl/hpl-ozd.patch`, to `HPL_pdtest.c` only) calls the shim
+after the matrix allocation, before the timed solve: it page-locks HPL's
+matrix so those copies run at full PCIe speed, and allocates every device
+buffer and the ozdgemm workspace for the largest update, so no offloaded
+call allocates (the shim reports `late_allocs`, expected 0).
 
 ```bash
 bash scripts/build_hpl.sh          # verifies the tarball, patches, builds build/xhpl
@@ -206,9 +212,12 @@ path) are called.
   16384^3, ~35 ms at 32768^2x1024), so on an H200 wide-exponent data gains
   only at large k and loose tol (phi=2, 16384^3, tol 1e-6: 1.15x native);
   `phi >= 4` data always falls back.
-- On an H200 native FP64 is strong (INT8 is only ~20x faster in practice), so
-  14-moduli emulation wins only for large k (about k >= 8192); the ceiling is
-  20/N x for N moduli. See `docs/report-1007.md`.
+- On an H200 native FP64 is strong (INT8 is only ~24x faster in practice), so
+  14-moduli emulation wins only for large k (1.18x at 8192^3, 1.51x at
+  16384^3, 0.87x at 4096^3); the ceiling is 24/N x for N moduli. See
+  `REPORT.md`.
 - Running HPL through the shim cannot show a large gain on one H200: netlib
   HPL keeps the matrix on the host, so PCIe copies and host work dominate.
-- The cost model is fitted on one H200; other GPUs need a refit.
+- The cost model and the GEMM loop/batched threshold are tuned on one H200
+  with cuBLAS 13.2; other GPUs or cuBLAS versions need a refit
+  (`scripts/fit_model.py`, `scripts/abtest.sbatch`).
