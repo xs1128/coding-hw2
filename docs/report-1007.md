@@ -162,13 +162,31 @@ PCIe, not by DGEMM.
 
 At large k the INT8 GEMM dominates, which is the regime where emulation wins.
 
+**Ceiling on this GPU.** Both GEMMs were measured at 16384³ (Nsight):
+- The INT8 GEMM reaches 1,112 TOPS, and native DGEMM reaches 55.3 TFLOPS.
+- INT8 is therefore only **20×** faster than FP64 here.
+
+With N moduli, emulation runs N INT8 GEMMs. Even with free conversion and
+CRT, its speedup is at most 20/N:
+
+| Moduli | Ceiling | Measured at 16384³ | Share of ceiling |
+|---|---:|---:|---:|
+| 14 | 1.44× | 1.23× | 85% |
+| 11 | 1.83× | 1.56× | 85% |
+| 8 | 2.51× | 2.13× | 85% |
+
+Emulation is therefore within 15% of the best any INT8 scheme can do on an
+H200. Where it loses to native, the reason is that H200 FP64 is strong, not
+that the implementation is slow.
+
 ## 6. Current problems
 
 1. **HPL cannot show a gain on this setup.** The GEMM is only ~4% of the
    netlib HPL time on 1 rank (§4). A GPU-resident HPL would change that, but
    it is a separate multi-thousand-line project; this is the approach of the
    existing GEMMul8-based HPL we used only as a reference.
-2. **Native FP64 on the H200 is strong** (67 TFLOPS). Our model, which
+2. **Native FP64 on the H200 is strong** (67 TFLOPS peak, 1/30 of INT8; see
+   the ceiling in §5). Our model, which
    matches the measurements to within 5%, predicts the following on the
    spec's RTX 5090 (FP64 1.6 TFLOPS, INT8 838 TOPS, 1.8 TB/s):
    - 16384³: ~21× over native with 14 moduli.
@@ -190,18 +208,30 @@ At large k the INT8 GEMM dominates, which is the regime where emulation wins.
 
 ## 7. Plan for the last week (10/8–10/13)
 
-1. **Fused INT8 GEMM + mod epilogue (CUTLASS).** Reduce each INT32
-   accumulator mod m inside the GEMM epilogue and store uint8. This cuts the
-   intermediate traffic by 4×.
-   - Estimate: HPL shape from 65.6 ms to ~30 ms, i.e. 0.59× → ~1.3× vs.
-     native.
-   - This attacks the measured bottleneck directly.
+We first considered a fused INT8 GEMM + mod epilogue (CUTLASS). It would
+store residues as uint8 and cut the INT32 traffic 4×. Costed properly at the
+INT8 rate we actually achieve (not the peak), it does not pay off:
+- The INT8 work alone takes ≥ 28 ms at the HPL shape with 14 moduli.
+- The fused path would total ~35–40 ms vs. 38 ms native, i.e. break-even.
+  With 11 moduli it would reach ~1.2×.
+- In HPL, where the GEMM is 4% of the time, that is < 1% of the score.
+
+It stays optional. The plan instead:
+
+1. **Overlap copies and compute in the HPL shim.**
+   - Split C into column chunks and run copy-in, GEMM and copy-out on three
+     streams.
+   - Today these steps run one after another and take 23.7 s of 66.5 s.
+   - Expected: ~10 s saved, ~15% on the HPL score, for native and emulated
+     alike.
 2. **Two-level estimate for the adaptive bound.** Quantize `|A|` in two
    exponent bands so that φ ≥ 2 inputs get a finite R. This recovers the
    `adapt-phi*` cases without weakening the guarantee.
-3. **Refit the AUTO cost model** after (1), and re-run the HPL comparison.
-4. **Final report and README.** Add HPL build/run steps, the failure cases,
-   and the applicable scope (large k, and GPUs with weak FP64).
+3. **Same-node A/B of v1 vs. v2** to settle two shapes that looked ~8% slower
+   in v2 (4096³ and 8192²×1024; the runs were on different nodes).
+4. **Final report and README.** Add HPL build/run steps, the ceiling analysis,
+   the failure cases, and the applicable scope (large k, and GPUs with weak
+   FP64).
 
 **Questions for the TA:**
 - Is cuBLAS's INT8 GEMM acceptable as a building block? Our own v0 serves as
