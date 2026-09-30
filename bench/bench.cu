@@ -103,15 +103,18 @@ int main(int argc, char** argv) {
         CK(cudaMemcpy(dB, B.data(), B.size() * 8, cudaMemcpyHostToDevice));
         CK(cudaMemset(dC, 0, (size_t)s.m * s.n * 8));
 
-        struct Run { int bk, md; double tol; };  // tol < 0: fixed moduli md
+        // tol < 0: fixed moduli md. Native runs first and again last
+        // ("native_post") so clock/power drift over the shape is visible.
+        struct Run { int bk, md; double tol; bool post; };
         std::vector<Run> runs;
-        if (native) runs.push_back({OZD_BACKEND_NATIVE, 0, -1});
+        if (native) runs.push_back({OZD_BACKEND_NATIVE, 0, -1, false});
         for (int bk : {OZD_BACKEND_EMU, OZD_BACKEND_AUTO}) {
             if (bk == OZD_BACKEND_AUTO && !with_auto) continue;
-            for (int md : moduli) runs.push_back({bk, md, -1});
-            for (double t : tols) runs.push_back({bk, 0, t});
+            for (int md : moduli) runs.push_back({bk, md, -1, false});
+            for (double t : tols) runs.push_back({bk, 0, t, false});
         }
-        for (auto [bk, md, tol] : runs) {
+        if (native && runs.size() > 1) runs.push_back({OZD_BACKEND_NATIVE, 0, -1, true});
+        for (auto [bk, md, tol, post] : runs) {
             ozd_set_backend(h, (ozd_backend_t)bk);
             if (tol >= 0) ozd_set_accuracy(h, tol);
             else if (md) ozd_set_moduli(h, md);
@@ -146,7 +149,7 @@ int main(int argc, char** argv) {
             }
             ozd_get_info(h, &info);
             const double tf = 2.0 * s.m * s.n * s.k / (med * 1e-3) / 1e12;
-            const std::string label = bk == OZD_BACKEND_NATIVE ? "native"
+            const std::string label = bk == OZD_BACKEND_NATIVE ? (post ? "native_post" : "native")
                                       : std::string(bk == OZD_BACKEND_AUTO ? "auto_" : "emu_") + ozd_version();
             std::printf("%s,%s,%s,%d,%ld,%ld,%ld,%.4f,%.4f,%.2f,%d,%.4f,%.4f,%.4f,%.4f,%.4f,"
                         "%g,%d,%d,%d,%.4f,%.4f,%.4f\n",
