@@ -4,5 +4,5 @@ third_party/hpl-2.3/
 *.ncu-rep
 *.sqlite
 results/*/tmp/
-baseline-v0/
+baseline-v*/
 results/*/run-*/
