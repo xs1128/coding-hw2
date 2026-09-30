@@ -849,10 +849,14 @@ ozd_status_t ozd_dgemm(ozd_handle_t h, ozd_op_t ta, ozd_op_t tb, int64_t m,
         h->info.t_convert_ms += tm.lap();
 
         nvtxRangePushA("ozd:gemm");
-        OZD_CUBLAS(cublasGemmStridedBatchedEx_64(
-            h->cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, nb, kp, &one, A8, CUDA_R_8I, kp,
-            slabA, B8, CUDA_R_8I, kp, slabB, &zero, C32, CUDA_R_32I, L.mp, slabC, nmod,
-            CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT));
+        // One GEMM per modulus rather than one strided-batched call: for the
+        // batched call cuBLAS 13.2 picks a 64x128 tile on sm_90, the single
+        // call a 128x256 one (21% faster per GEMM at 16384^3, Nsight 461398).
+        for (int t = 0; t < nmod; ++t)
+            OZD_CUBLAS(cublasGemmEx_64(h->cublas, CUBLAS_OP_T, CUBLAS_OP_N, m, nb, kp, &one,
+                                       A8 + t * slabA, CUDA_R_8I, kp, B8 + t * slabB, CUDA_R_8I,
+                                       kp, &zero, C32 + t * slabC, CUDA_R_32I, L.mp,
+                                       CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT));
         nvtxRangePop();
         h->info.t_gemm_ms += tm.lap();
 

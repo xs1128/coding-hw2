@@ -1,5 +1,5 @@
 # Build on the nano4 login node (no GPU needed to compile):
-#   source scripts/env.sh && make -j
+#   make -j   (paths below point at NVHPC 26.3; override NVHPC_ROOT/CUDA_PATH/MATH_PATH elsewhere)
 NVHPC_ROOT ?= /work/envstack/apps/nvhpc/26.3/Linux_x86_64/26.3
 CUDA_PATH  ?= $(NVHPC_ROOT)/cuda/13.1
 MATH_PATH  ?= $(NVHPC_ROOT)/math_libs/13.1
