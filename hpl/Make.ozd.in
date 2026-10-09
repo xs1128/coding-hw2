@@ -1,0 +1,41 @@
+# HPL 2.3 arch file: CBLAS calls, with cblas_dgemm provided by ozd_shim.cu.
+# Generated into the HPL tree by scripts/build_hpl.sh (@...@ substituted).
+SHELL        = /bin/sh
+CD           = cd
+CP           = cp
+LN_S         = ln -fs
+MKDIR        = mkdir -p
+RM           = /bin/rm -f
+TOUCH        = touch
+ARCH         = ozd
+TOPdir       = @HPLDIR@
+INCdir       = $(TOPdir)/include
+BINdir       = $(TOPdir)/bin/$(ARCH)
+LIBdir       = $(TOPdir)/lib/$(ARCH)
+HPLlib       = $(LIBdir)/libhpl.a
+NVHPC        = @NVHPC_ROOT@
+MPdir        = $(NVHPC)/comm_libs/13.1/hpcx/hpcx-2.25.1/ompi
+MPinc        = -I$(MPdir)/include
+MPlib        = -L$(MPdir)/lib -lmpi -Wl,-rpath,$(MPdir)/lib
+CUDAlib      = $(NVHPC)/cuda/13.1/lib64
+MATHlib      = $(NVHPC)/math_libs/13.1/lib64
+CPUBLASlib   = $(NVHPC)/compilers/lib
+LAinc        =
+# Order matters: the shim must resolve cblas_dgemm before the CPU BLAS does.
+LAlib        = @REPO@/build/libozdhpl.a @REPO@/build/libozdgemm.a \
+               -L$(MATHlib) -lcublas -lcublasLt -L$(CUDAlib) -lcudart \
+               -L$(CPUBLASlib) -lblas -lstdc++ -lm \
+               -Wl,-rpath,$(MATHlib) -Wl,-rpath,$(CUDAlib) -Wl,-rpath,$(CPUBLASlib)
+F2CDEFS      =
+HPL_INCLUDES = -I$(INCdir) -I$(INCdir)/$(ARCH) $(LAinc) $(MPinc)
+HPL_LIBS     = $(HPLlib) $(LAlib) $(MPlib)
+HPL_OPTS     = -DHPL_CALL_CBLAS -DHPL_OZD
+HPL_DEFS     = $(F2CDEFS) $(HPL_OPTS) $(HPL_INCLUDES)
+CC           = $(MPdir)/bin/mpicc
+CCNOOPT      = $(HPL_DEFS)
+CCFLAGS      = $(HPL_DEFS) -O3 -march=native -fomit-frame-pointer -funroll-loops -W -Wall
+LINKER       = $(CC)
+LINKFLAGS    = $(CCFLAGS)
+ARCHIVER     = ar
+ARFLAGS      = r
+RANLIB       = echo

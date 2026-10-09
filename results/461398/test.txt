@@ -1,0 +1,42 @@
+case                   m     n      k  op  mod |    emu_cw    nat_cw    emu_nw |  err/bnd  err/tol  path result
+square-uniform       512   512    512  NN   14 |  3.76e-16  4.67e-16  2.80e-16 |    0.052    0.000   emu PASS
+square-alpha-beta    512   512    512  NN   14 |  3.84e-16  4.55e-16  2.88e-16 |    0.054    0.000   emu PASS
+odd-shape           1000   777    333  NN   14 |  4.65e-16  6.21e-16  3.59e-16 |    0.082    0.000   emu PASS
+op-NT                300   200    150  NT   14 |  2.65e-16  3.90e-16  1.94e-16 |    0.064    0.000   emu PASS
+op-TN                300   200    150  TN   14 |  2.52e-16  3.64e-16  1.91e-16 |    0.062    0.000   emu PASS
+op-TT                300   200    150  TT   14 |  2.50e-16  5.37e-16  1.84e-16 |    0.060    0.000   emu PASS
+padded-ld            257   129     65  NN   14 |  4.64e-16  3.35e-16  3.45e-16 |    0.163    0.000   emu PASS
+1x1x1                  1     1      1  NN   14 |  0.00e+00  0.00e+00  0.00e+00 |    0.000    0.000   emu PASS
+skinny-n            4096     8   1024  NN   14 |  4.87e-16  3.90e-16  3.69e-16 |    0.050    0.000   emu PASS
+small-k             2048  2048     16  NN   14 |  3.71e-16  5.60e-16  3.27e-16 |    0.246    0.000   emu PASS
+large-k               64    64  16384  NN   14 |  5.24e-16  4.36e-17  3.91e-16 |    0.014    0.000   emu PASS
+hpl-like            2048  2048   1024  NN   14 |  6.37e-16  6.09e-16  4.79e-16 |    0.064    0.000   emu PASS
+phi0.5               512   512    512  NN   14 |  7.84e-16  6.93e-16  4.58e-16 |    0.087    0.000   emu PASS
+phi2                 512   512    512  NN   14 |  1.72e-13  3.98e-15  3.22e-16 |    0.064    0.000   emu PASS
+phi4                 512   512    512  NN   14 |  2.71e-09  4.27e-15  2.92e-16 |    0.058    0.000   emu PASS
+rowscale-2^300       512   512    512  NN   14 |  3.82e-16  4.40e-16  2.79e-16 |    0.052    0.000   emu PASS
+zero-vectors         300   300    300  NN   14 |  4.62e-16  4.55e-16  3.46e-16 |    0.083    0.000   emu PASS
+moduli-8             512   512    512  NN    8 |  7.21e-09  4.67e-16  5.35e-09 |    0.063    0.000   emu PASS
+moduli-11            512   512    512  NN   11 |  1.80e-12  4.67e-16  1.34e-12 |    0.065    0.000   emu PASS
+moduli-16            512   512    512  NN   16 |  1.23e-15  3.98e-15  6.00e-17 |    0.319    0.000   emu PASS
+col-blocked         1024  1024    512  NN   14 |  4.06e-16  4.74e-16  3.00e-16 |    0.056    0.000   emu PASS
+nan-input            128   128    128  NN    0 |  3.42e-16  3.42e-16  2.68e-16 |    0.728    0.000 nat/1 PASS
+inf-input            128   128    128  NN    0 |  3.42e-16  3.42e-16  2.68e-16 |    0.728    0.000 nat/1 PASS
+adapt-uniform       1024  1024   1024  NN   14 |  5.98e-16  6.42e-16  4.43e-16 |    0.059    0.005   emu PASS
+adapt-hpl-beta      2048  2048   1024  NN   14 |  6.37e-16  6.09e-16  4.79e-16 |    0.064    0.006   emu PASS
+adapt-phi0.5         512   512    512  NN   15 |  8.86e-17  6.93e-16  5.30e-17 |    0.059    0.002   emu PASS
+adapt-phi2           512   512    512  NN    0 |  3.98e-15  3.98e-15  1.81e-15 |    6.988    0.070 nat/4 PASS
+adapt-phi4           512   512    512  NN    0 |  4.27e-15  4.27e-15  3.29e-15 |    7.937    0.075 nat/4 PASS
+adapt-rowscale       512   512    512  NN   14 |  3.82e-16  4.40e-16  2.79e-16 |    0.052    0.007   emu PASS
+adapt-zerovecs       300   300    300  TT   14 |  4.48e-16  4.21e-16  3.50e-16 |    0.083    0.013   emu PASS
+adapt-tol1e-6       1024  1024   1024  NN    8 |  1.15e-08  6.42e-16  8.46e-09 |    0.071    0.011   emu PASS
+adapt-tol1e-10      1024  1024   1024  NT    0 |  6.03e-15  6.03e-15  2.17e-15 |    7.878    0.000 nat/4 PASS
+adapt-blocked       1024  1024    512  NN   15 |  9.07e-17  6.97e-16  5.40e-17 |    0.061    0.002   emu PASS
+auto-tiny             64    64     64 pred native    0.013 ms emu    0.059 ms -> native PASS
+auto-skinny        16384    64  16384 pred native    0.619 ms emu    6.746 ms -> native PASS
+auto-hpl-k256       8192  8192    256 pred native    0.619 ms emu    2.859 ms -> native PASS
+auto-square-m8      8192  8192   8192 pred native   19.418 ms emu   11.074 ms -> emu PASS
+blocking-invariance bitwise equal to unblocked (4 blocks): PASS
+determinism        bitwise equal on repeat: PASS
+
+0 failure(s)

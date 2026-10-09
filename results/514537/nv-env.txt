@@ -1,0 +1,6 @@
+host=25a-hgpn017 date=2026-10-08T10:57:28+08:00 commit=39c67b2 cpus=12
+sif=/work/u1131128/hw2-sif/hpc-benchmarks-26.02.01.sif
+NVIDIA H200, 580.65.06, 1980 MHz, 700.00 W, 143771 MiB
+CPU(s):                                  112
+Model name:                              Intel(R) Xeon(R) Platinum 8480+
+CPU(s) scaling MHz:                      47%

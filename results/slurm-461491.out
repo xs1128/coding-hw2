@@ -1,0 +1,10 @@
+host=25a-hgpn006 date=2026-09-30T16:21:51+08:00 commit=169a0cc N=50000 NB=1024 threads=12
+NVIDIA H200, 580.65.06, 1980 MHz, 700.00 W
+CPU(s):                                  112
+Model name:                              Intel(R) Xeon(R) Platinum 8480+
+CPU(s) scaling MHz:                      55%
+config,N,NB,time_s,gflops,residual,status,gpu_calls,emulated,moduli,gpu_gflop,h2d_s,gemm_s,d2h_s,cpu_blas_s,shim_wall_s
+native,50000,1024,41.83,1.9921e+03,2.10641927e-03,PASSED,47,0,0,80791.8,6.96,1.45,6.43,7.81,7.52
+emu:14,50000,1024,44.17,1.8868e+03,2.43773616e-03,PASSED,47,47,14,80791.8,6.68,5.30,6.21,8.10,9.73
+native_PIPE0,50000,1024,48.78,1.7086e+03,2.10641927e-03,PASSED,47,0,0,80791.8,6.40,1.39,5.95,8.13,13.80
+emu:14_PIPE0,50000,1024,49.72,1.6761e+03,2.43773616e-03,PASSED,47,47,14,80791.8,6.40,2.36,5.95,8.18,14.77

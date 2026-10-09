@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<link rel="stylesheet" href="../equations/math.css"/>
+<title>ozdgemm Final Report</title>
+<style>
+@page { size: A4; margin: 20mm; }
+* { font-family: "Times New Roman"; box-sizing: border-box; color: black; }
+body { margin: 0; font-size: 11pt; line-height: 1.3; background: white; }
+h1 { font-size: 18pt; text-align: center; margin: 0 0 10pt; }
+.header-meta { font-size: 12pt; text-align: center; margin: 0 0 5pt; }
+hr { border: 0; border-top: .7pt solid black; margin: 12pt 0 14pt; }
+h2 { font-size: 13pt; margin: 16pt 0 6pt; break-after: avoid; }
+h3 { font-size: 11.5pt; margin: 10pt 0 5pt; break-after: avoid; }
+p { margin: 0 0 8pt; text-align: justify; }
+pre { font-size: 9.5pt; white-space: pre-wrap; overflow-wrap: anywhere; margin: 6pt 0 10pt; }
+table { width: 100%; border-collapse: collapse; font-size: 9pt; margin: 6pt 0 10pt; }
+thead { display: table-header-group; }
+tr { break-inside: avoid; }
+th, td { padding: 4pt 5pt; vertical-align: top; text-align: left; border-bottom: .3pt solid #aaa; }
+th { border-top: .7pt solid black; border-bottom: .6pt solid black; }
+tr:last-child td { border-bottom: .6pt solid black; }
+.n { text-align: right; }
+.meta, .sub, figcaption { font-size: 9.5pt; }
+figure { margin: 8pt 0 12pt; break-inside: avoid; }
+figure img { display: block; width: 82%; max-height: 67mm; object-fit: contain; margin: 0 auto; }
+figcaption { margin-top: 4pt; text-align: justify; }
+.math img { display: inline-block; }
+.equation { text-align: center; margin: 5pt 0 9pt; break-inside: avoid; }
+.equation img { max-width: 100%; }
+</style>
+</head>
+<body>
+<h1>Coding-Basic-HW-2</h1>
+<p class="header-meta">Student ID: 113062362</p>
+<p class="header-meta">Date: October 8, 2026</p>
+<hr/>
+<h2>ozdgemm: Adaptive FP64 GEMM Emulation and HPL</h2>
+<p class="sub">Coding-Basic HW2, default topic: Adaptive FP64 GEMM Emulation + HPL ·
+NCHC nano4, 1× NVIDIA H200 · CUDA 13.1 / cuBLAS 13.2 (NVHPC 26.3) · repo <span>hw2/</span>
+(measurements are tied to Slurm job files under <span>results/&lt;job&gt;/</span>)</p>
+<h3>Abstract</h3><p>This report presents ozdgemm, an adaptive FP64 matrix multiplication library that uses INT8 Tensor Cores through Ozaki scheme II and the Chinese remainder theorem. It describes the implementation, per-entry accuracy checks, GEMM measurements, integration with netlib HPL, and comparisons with NVIDIA HPL. On one H200, the final library reaches 1.51 times the cuBLAS DGEMM speed at 16384 cubed with 14 moduli. Smaller inner dimensions reduce the benefit. The correctness suite reports no failures. The netlib HPL score remains near 2 TFLOPS because transfers and host work dominate. NVIDIA HPL reaches 39.25 TFLOPS on the same H200 node at a similar problem size. All measurements are tied to result files. The RTX 5090 estimates are identified as model projections.</p>
+<!-- ============================================================ -->
+<h2>1. Problem definition</h2>
+<p><b>Task.</b> Implement FP64 GEMM emulation on low-precision Tensor Cores that is <i>adaptive</i> (chooses its precision and
+backend per call), integrate it into HPL, and show where it helps and where it does not. The deliverables are a library, its
+correctness evidence, GEMM and HPL performance, and an honest account of the limits.</p>
+<p><b>Why it matters.</b> Recent GPUs grow low-precision throughput much faster than FP64. Consumer GPUs (the RTX 5090 in the spec)
+have ~1/64-rate FP64. If FP64 GEMM can be rebuilt exactly from INT8
+products, scientific codes keep FP64 accuracy at low-precision speed. The open questions are how many INT8 products are needed,
+how to <i>guarantee</i> the accuracy, and when the overhead is worth it.</p>
+<p><b>Setting.</b> The available GPU types for this project are H200 and RTX 5090. The measured results included here use one H200 (sm_90, 700 W): FP64 Tensor Core peak 67 TFLOPS (cuBLAS reaches ~56) and INT8 1,979 dense TOPS (cuBLAS reaches ~1,350). That is a hard case for emulation because FP64 is strong. Section 6 discusses RTX 5090 model projections. Those values are not measured RTX 5090 results.</p>
+<table data-caption="Table 1. Success criteria.">
+<tr><th>Criterion</th><th>How it is measured</th></tr>
+<tr><td>Accuracy is guaranteed, not hoped for</td><td>every output entry checked against a proven bound using a double-double reference GEMM</td></tr>
+<tr><td>Make backend and accuracy decisions visible</td><td>AUTO predictions and reported fallback reasons, with speed checked on measured cases</td></tr>
+<tr><td>Faster than cuBLAS DGEMM where the hardware allows</td><td>median of 10 timed calls, native timed in the same job on the same GPU</td></tr>
+<tr><td>Runs inside a real application</td><td>HPL 2.3 passes its residual check with emulated DGEMM</td></tr>
+<tr><td>Positioned against the state of the art</td><td>NVIDIA's HPL (HPC-Benchmarks) on the same node</td></tr>
+</table>
+<!-- ============================================================ -->
+<h2>2. Background: how INT8 can compute FP64</h2>
+<p>An FP64 number has a 53-bit significand. INT8 Tensor Cores multiply 8-bit integers and accumulate exactly in INT32. Ozaki
+scheme II bridges the gap with the <b>Chinese remainder theorem (CRT)</b>:</p>
+<p><b>Turn FP64 into big integers.</b> Scale each row of A and column of B by a power of two and truncate, giving integer matrices
+<span class="math" data-id="integer-inputs" data-latex="A&#x27;,\ B&#x27;"><img src="../equations/integer-inputs.png" alt="A&#x27;, B&#x27;"/></span>. Power-of-two scaling is exact, so the only error is the truncation.</p><p><b>Split each big integer into small residues.</b> Pick pairwise-coprime moduli <span class="math" data-id="moduli-range" data-latex="m_1,\ldots,m_N\leq256"><img src="../equations/moduli-range.png" alt="m1,...,mN &lt;= 256"/></span> and store <span class="math" data-id="input-residues" data-latex="A&#x27;\bmod m_t\quad\text{and}\quad B&#x27;\bmod m_t"><img src="../equations/input-residues.png" alt="A&#x27; mod mt and B&#x27; mod mt"/></span>
+as signed INT8 using balanced residues. For modulus 256 the stored range is [-128, 127]. For an odd modulus it is the symmetric range around zero. A nonnegative residue above the positive half-range is stored as that residue minus the modulus. For example, 200 modulo 256 is stored as -56. The conversion kernel implements this in <span>write_residues</span>.</p><p><b>Multiply residues exactly.</b> <span class="math" data-id="residue-product" data-latex="(A&#x27;\bmod m_t)(B&#x27;\bmod m_t)"><img src="../equations/residue-product.png" alt="(A&#x27; mod mt)(B&#x27; mod mt)"/></span> on INT8 Tensor Cores gives <span class="math" data-id="output-residue" data-latex="A&#x27;B&#x27;\bmod m_t"><img src="../equations/output-residue.png" alt="A&#x27;B&#x27; mod mt"/></span> exactly, once per modulus, after reducing the signed INT32 dot product modulo its modulus. The <span>imod</span> helper maps that product back to a residue in [0, m), and this reduction is fused into CRT reconstruction.</p><p><b>Rebuild the product.</b> The CRT recovers the integer product uniquely from its N residues when the product is within the signed reconstruction range:</p><div class="equation" data-id="crt-range" data-latex="\lvert A&#x27;B&#x27;\rvert_{ij}&lt;\frac{M}{2},\qquad M=\prod_{t=1}^{N}m_t"><img src="../equations/crt-range.png" alt="|A&#x27;B&#x27;|ij &lt; M/2, M = product of moduli"/></div><p>Undo the scaling and you have the FP64 product.</p>
+<p>
+<b>Toy example.</b> With moduli 7 and 11 (<span class="math" data-id="toy-modulus-product" data-latex="M=7\cdot11=77"><img src="../equations/toy-modulus-product.png" alt="M = 7 x 11 = 77"/></span>), the integer 30 is stored as <span class="math" data-id="toy-residues" data-latex="(30\bmod7,\ 30\bmod11)=(2,8)"><img src="../equations/toy-residues.png" alt="(30 mod 7, 30 mod 11) = (2, 8)"/></span>. Every integer in [−38, 38] has a distinct residue pair, so (2, 8) can only mean 30. Negative values work too (<span class="math" data-id="negative-residues" data-latex="-20\longmapsto(1,2)"><img src="../equations/negative-residues.png" alt="-20 maps to (1, 2)"/></span>). Real moduli
+are 256, 255, 253, 251, 247, …: with 14 of them, <span class="math" data-id="modulus-capacity" data-latex="M\approx2^{110}"><img src="../equations/modulus-capacity.png" alt="M approximately 2^110"/></span>, which leaves room for 54-bit scaled inputs (<span class="math" data-id="precision-54" data-latex="P=54"><img src="../equations/precision-54.png" alt="P = 54"/></span>), about FP64 accuracy.
+<b>More moduli = more bits = more accuracy, and each modulus costs one INT8 GEMM.</b>
+</p>
+<p><b>The trade-off in one line.</b> N moduli cost N INT8 GEMMs plus conversion and CRT, versus one FP64 GEMM. On the H200 INT8 is ~24×
+faster than FP64, so <i>even with free conversion</i> the approximate throughput ceiling is <span class="math" data-id="throughput-ceiling" data-latex="24/N"><img src="../equations/throughput-ceiling.png" alt="24/N"/></span>, or 1.7× for 14 moduli. On an RTX 5090
+(INT8/FP64 ≈ 500×) the same scheme has far more headroom.</p>
+<!-- ============================================================ -->
+<h2>3. Our method</h2>
+<h3>3.1 Pipeline of one <span>ozd_dgemm</span> call</h3>
+<table data-caption="Table 2. Stages of one ozd_dgemm call."><tr><th>Stage</th><th>Operation</th><th>Purpose</th></tr><tr><td>1. Scale</td><td>Choose power-of-two row and column exponents.</td><td>Bound the scaled input norms and the product range.</td></tr><tr><td>2. Convert</td><td>Truncate scaled FP64 inputs and store residues as INT8.</td><td>Represent large integers using small coprime moduli.</td></tr><tr><td>3. Multiply</td><td>Run one INT8 GEMM per modulus with INT32 accumulation.</td><td>Compute the residue products exactly.</td></tr><tr><td>4. Reconstruct</td><td>Reduce the results and apply the CRT in a fused kernel.</td><td>Recover the signed integer product.</td></tr><tr><td>5. Unscale</td><td>Apply the inverse scaling, alpha and beta.</td><td>Return <span class="math" data-id="gemm-update" data-latex="C=\alpha AB+\beta C"><img src="../equations/gemm-update.png" alt="C = alpha AB + beta C"/></span>.</td></tr><tr><td>Adaptive and AUTO</td><td>Select the moduli count and compare predicted runtimes.</td><td>Use native DGEMM when accuracy or runtime requires it.</td></tr></table>
+<p class="meta">Steps 1-5 are <span>src/ozdgemm.cu</span> (896 lines). Only cuBLAS INT8 GEMM
+(<span>cublasGemmEx</span>, <span>CUBLAS_COMPUTE_32I</span>) and <span>cublasDgemm</span> are called. GEMMul8 and cuBLAS's own FP64 emulation are not used.</p>
+<h3>3.2 Details that matter</h3>
+<p><b>Scaling bound.</b> For each row of A, pick a power-of-two exponent so the scaled row has a 2-norm below the retained precision limit. Apply the same rule to columns of B. The bound makes CRT reconstruction unambiguous:</p><div class="equation" data-id="scaled-product-bound" data-latex="\lvert A&#x27;B&#x27;\rvert_{ij}&lt;2^{2P}\leq\frac{M}{4}"><img src="../equations/scaled-product-bound.png" alt="|A&#x27;B&#x27;|ij &lt; 2^(2P) &lt;= M/4"/></div><p>The retained precision is selected from the modulus product:</p><div class="equation" data-id="precision-bits" data-latex="P=\left\lfloor\frac{\lfloor\log_2 M\rfloor-2}{2}\right\rfloor"><img src="../equations/precision-bits.png" alt="P = floor((floor(log2 M) - 2)/2)"/></div><p>For 14 moduli, <span class="math" data-id="precision-54" data-latex="P=54"><img src="../equations/precision-54.png" alt="P = 54"/></span>.</p><p><b>Exact CRT in FP64.</b> The reconstruction uses the following coefficients:</p><div class="equation" data-id="crt-reconstruction" data-latex="X=\left(\sum_{t=1}^{N}c_tS_t\right)\bmod M,\qquad S_t=M_t\left(M_t^{-1}\bmod m_t\right),\qquad M_t=\frac{M}{m_t}"><img src="../equations/crt-reconstruction.png" alt="X = sum(ct St) mod M, St = Mt (Mt^-1 mod mt), Mt = M/mt"/></div><p>The modulus product exceeds <span class="math" data-id="modulus-size" data-latex="2^{100}"><img src="../equations/modulus-size.png" alt="2^100"/></span>, so each coefficient is split into 40-bit chunks. Every partial sum is exact in FP64, the quotient by M is found by rounding, and the signed result is summed with TwoSum. The reduction modulo each modulus uses integer magic-number division, fused into the CRT kernel. This saves one pass over all INT32 intermediates.</p><p><b>Error budget.</b> Let C0 be the input matrix, Cexact the exact real-arithmetic update, and the hatted C the returned FP64 result. The truncation estimate and final rounding budget are kept separate:</p><div class="equation" data-id="error-bound" data-latex="\lvert\widehat C-C_{\mathrm{exact}}\rvert_{ij}\leq4\sqrt{k}\,2^{-P}\lvert\alpha\rvert\lVert A_i\rVert_2\lVert B_j\rVert_2+4u\left(\lvert\alpha\rvert\lvert A\rvert\lvert B\rvert+\lvert\beta C_0\rvert\right)_{ij}"><img src="../equations/error-bound.png" alt="Total error &lt;= truncation estimate + final rounding budget"/></div><p>Here u is <span class="math" data-id="unit-roundoff" data-latex="2^{-53}"><img src="../equations/unit-roundoff.png" alt="2^-53"/></span>, the FP64 unit roundoff. This budget assumes finite arithmetic without overflow or significant underflow. It is the criterion checked by the test suite, rather than an unconditional guarantee for every representable input.</p><p><b>GEMM call shape.</b> For <span class="math" data-id="gemm-loop-rule" data-latex="k\geq2048\quad\text{and}\quad m,n\geq1024"><img src="../equations/gemm-loop-rule.png" alt="k &gt;= 2048 and m,n &gt;= 1024"/></span> we issue one cuBLAS INT8 GEMM per modulus. cuBLAS then picks a 128×256
+tile, 1.1-1.2× faster than the strided-batched call. Smaller problems keep one batched call to save launches (Nsight, A/B job 466399).</p>
+<h3>3.3 Adaptive moduli: <span>ozd_set_accuracy(tol)</span></h3>
+<p>The requested tolerance controls the emulation truncation term. For a certified emulated call, the total error budget also includes final FP64 rounding:</p><div class="equation" data-id="requested-accuracy" data-latex="\lvert\widehat C-C_{\mathrm{exact}}\rvert_{ij}\leq\tau\lvert\alpha\rvert\left(\lvert A\rvert\lvert B\rvert\right)_{ij}+E_{\mathrm{round},ij}"><img src="../equations/requested-accuracy.png" alt="Total error &lt;= effective tolerance times absolute product + final rounding budget"/></div><p>For positive tol, <span class="math" data-id="positive-tolerance" data-latex="\tau=\operatorname{tol}"><img src="../equations/positive-tolerance.png" alt="tau = tol"/></span>. Setting tol = 0 selects the native-scale truncation target <span class="math" data-id="native-error-scale" data-latex="\tau=k\,2^{-53}"><img src="../equations/native-error-scale.png" alt="tau = k 2^-53"/></span>. It does not request zero error, a bitwise match to native DGEMM, or total error below tol alone. The rounding budget is:</p><div class="equation" data-id="rounding-budget" data-latex="E_{\mathrm{round},ij}=4u\left(\lvert\alpha\rvert\left(\lvert A\rvert\lvert B\rvert\right)_{ij}+\lvert\beta(C_0)_{ij}\rvert\right)"><img src="../equations/rounding-budget.png" alt="Final rounding budget includes both alpha AB and beta C0"/></div><p>For example, A = B = 1, alpha = beta = 1, and C0 = <span class="math" data-id="large-c-input" data-latex="2^{53}"><img src="../equations/large-c-input.png" alt="2^53"/></span> give the exact result <span class="math" data-id="unrepresentable-result" data-latex="2^{53}+1"><img src="../equations/unrepresentable-result.png" alt="2^53 + 1"/></span>, which is not representable in FP64. More CRT moduli cannot remove that final rounding error. Precision selection therefore controls the truncation contribution using the row/column norm ratio:</p><div class="equation" data-id="adaptive-condition" data-latex="4\sqrt{k}\,2^{-P}R\leq\tau,\qquad R=\max_{i,j}\frac{\lVert A_i\rVert_2\lVert B_j\rVert_2}{\left(\lvert A\rvert\lvert B\rvert\right)_{ij}}"><img src="../equations/adaptive-condition.png" alt="Truncation condition uses the effective tolerance tau"/></div><p><b>Level 1.</b> One extra INT8 GEMM uses conservatively rounded input magnitudes:</p><div class="equation" data-id="level-one-quantization" data-latex="\left\lfloor\lvert a\rvert\,2^{6-a_{\max,i}}\right\rfloor"><img src="../equations/level-one-quantization.png" alt="floor(|a| 2^(6 - amax,i))"/></div><p>The values are between 0 and 127 and never exceed the true scaled magnitudes. This gives a lower bound on the absolute matrix product and an upper bound on R. Pick the fewest moduli whose retained precision satisfies:</p><div class="equation" data-id="adaptive-precision" data-latex="P\geq\log_2R+2+\frac{1}{2}\log_2k-\log_2\tau"><img src="../equations/adaptive-precision.png" alt="Required precision uses the effective tolerance tau"/></div><p><b>Level 2</b> runs only if level 1 fails. Wide exponent ranges can round lower bounds to zero. Two floor-quantized bands retain more of each scaled magnitude. Four INT8 GEMMs, accumulated in 64 bits, form a finer lower bound:</p><div class="equation" data-id="level-two-split" data-latex="h=\lfloor s\rfloor,\quad l=\lfloor128(s-h)\rfloor,\quad s\geq h+\frac{l}{128}"><img src="../equations/level-two-split.png" alt="Two quantized bands give a lower bound on the scaled magnitude"/></div><p>The four products are hh, hl, lh and ll. Their weighted sum gives the lower bound on the scaled absolute matrix product. Restoring the row and column power-of-two scales gives a bound for the original operands.</p><p><b>Fallback.</b> If the estimator cannot certify the truncation target with at most 16 moduli, including when its lower bound is still zero, return native DGEMM (<span>fallback_reason = 4</span>). This means the estimator cannot certify the requested target. It does not prove that the true product needs more than 16 moduli. A native fallback is reported and may miss the requested tolerance.</p>
+<h3>3.4 AUTO dispatcher and safety</h3>
+<p>A linear cost model predicts native and emulated time from (m, n, k, moduli). Its coefficients are fitted by least squares on relative error (<span>scripts/fit_model.py</span>, job 466503). The worst prediction error is 15.9%, and 63/63 fixed-moduli comparisons select the faster measured path on that same fitting grid. These are in-sample checks, not held-out validation.</p><p>AUTO can select native before scaling when the model predicts that even the fewest admissible moduli cannot win. Later decisions can incur estimation work. Runtime prediction is empirical and cannot guarantee that AUTO is never slower on an unseen shape or under different GPU conditions. The caller can inspect predictions and fallback reasons or force a backend.</p><p>Fallbacks with reason codes: 1 NaN/Inf input (IEEE result preserved), 2 degenerate (k = 0, α = 0, k &gt; 131056 [INT32 accumulator],
+workspace cap), 3 AUTO chose native, 4 estimator could not certify the tolerance. No fallback is silent: <span>ozd_get_info</span> reports
+the path, the moduli used and the reason.</p>
+<p>API call sequence (pseudocode):</p><pre>Create handle h on stream
+Set backend(h, AUTO) to select native or emulated GEMM
+Set accuracy(h, 0.0) for a native-scale truncation target, or set moduli(h, 14)
+Reserve workspace(h, m, n, k) before the timed region
+Call ozd_dgemm(h, opA, opB, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc)
+Get info(h) for the selected path, moduli, fallback reason and predictions</pre>
+<h3>3.5 HPL integration</h3>
+<p>netlib HPL 2.3 (unmodified tarball, sha256-checked) is built with <span>-DHPL_CALL_CBLAS</span>. A link-time shim
+(<span>hpl/ozd_shim.cu</span>) <i>defines</i> <span>cblas_dgemm</span>: updates with <span class="math" data-id="hpl-offload-rule" data-latex="M,N\geq1024\quad\text{and}\quad K\geq128"><img src="../equations/hpl-offload-rule.png" alt="M,N &gt;= 1024 and K &gt;= 128"/></span> go to the GPU through
+<span>ozd_dgemm</span>, smaller calls stay on the CPU BLAS.</p><p>netlib HPL keeps its matrix in host memory, so each offloaded update copies A, B and C over PCIe. A 3-line patch to
+<span>HPL_pdtest.c</span> page-locks the matrix and pre-allocates every device buffer before the timed solve
+(<span>late_allocs = 0</span>).</p><p>The shim streams C in 2048-column chunks on three streams, so host→device copy, GEMM and device→host copy overlap. With fixed moduli
+the result is bitwise identical to the serial path.</p>
+<!-- ============================================================ -->
+<h2>4. Correctness</h2>
+<p><b>Reference:</b> <span>tests/common.cuh</span> accumulates the reference GEMM in double-double arithmetic, then stores the result as FP64. The comparisons therefore use an FP64-rounded reference, not an exact real-arithmetic oracle. The checks provide evidence for the stated error budget on the tested data.</p><p><b>Criterion:</b> <i>every</i> emulated output entry is compared with the rounded reference using the full error budget in Section 3.2 (fixed moduli) or <span class="math" data-id="adaptive-error-target" data-latex="\tau\lvert\alpha\rvert\left(\lvert A\rvert\lvert B\rvert\right)_{ij}+E_{\mathrm{round},ij}"><img src="../equations/adaptive-error-target.png" alt="Adaptive test budget includes final rounding"/></span> (adaptive). We also report the
+componentwise error next to native DGEMM's.</p><p><b>Suite</b> (<span>build/test_ozdgemm</span>, job 466571): 36 cases (all four transposes, odd shapes, padded lda, 1×1×1,
+skinny, k = 16…16384, zero vectors, rows scaled by <span class="math" data-id="adversarial-exponents" data-latex="2^{\pm300}"><img src="../equations/adversarial-exponents.png" alt="2^(+/-300)"/></span>, φ-distributed data, NaN/Inf), plus 4 dispatcher checks, column-blocking
+invariance and determinism. <b>0 failures</b>. Worst error/bound 0.32.</p><p><b>Adaptive sweep</b> (jobs 461134, 462933, 466503): 108 cases over 1024² × k  in  {256, 1024, 4096}, tol 1e-15…1e-3, uniform and φ data.
+All 79 emulated cases pass the full adaptive error budget. The largest stored error/budget ratio is <b>0.057</b>. Uniform (HPL-like) data needs 14 moduli at tol = 0, 11 at 1e-9, 8 at 1e-6.</p><p>NaN/Inf inputs fall back and reproduce IEEE NaN/Inf placement. Column blocking and repeated calls are bitwise identical.</p>
+<table data-caption="Table 3. Selected correctness cases (job 466571).">
+<tr><th>Selected cases (job 466571)</th><th class="n">moduli</th><th class="n">emu error</th><th class="n">native error</th><th class="n">err/bound</th><th>path</th></tr>
+<tr><td>square, uniform, 512³</td><td class="n">14</td><td class="n">3.8e-16</td><td class="n">4.7e-16</td><td class="n">0.052</td><td>emulated</td></tr>
+<tr><td>rows scaled by <span class="math" data-id="large-row-scale" data-latex="2^{300}"><img src="../equations/large-row-scale.png" alt="2^300"/></span></td><td class="n">14</td><td class="n">3.8e-16</td><td class="n">4.4e-16</td><td class="n">0.052</td><td>emulated</td></tr>
+<tr><td>8 moduli (fixed)</td><td class="n">8</td><td class="n">7.2e-09</td><td class="n">4.7e-16</td><td class="n">0.063</td><td>emulated</td></tr>
+<tr><td>adaptive, tol = 0, HPL-like, β ≠ 0</td><td class="n">14</td><td class="n">6.4e-16</td><td class="n">6.1e-16</td><td class="n">0.064</td><td>emulated, level 1</td></tr>
+<tr><td>adaptive, φ = 2, tol = 1e-6</td><td class="n">11</td><td class="n">9.8e-10</td><td class="n">5.7e-15</td><td class="n">0.054</td><td>emulated, level 2</td></tr>
+<tr><td>adaptive, φ = 4, tol = 0</td><td class="n">-</td><td class="n">4.3e-15</td><td class="n">4.3e-15</td><td class="n">-</td><td>native, reason 4</td></tr>
+</table>
+<p class="meta">The error columns use the maximum componentwise ratio <span class="math" data-id="measured-error" data-latex="\max_{i,j}\frac{\lvert\widehat C-C_{\mathrm{ref}}\rvert_{ij}}{\lvert\alpha\rvert\left(\lvert A\rvert\lvert B\rvert\right)_{ij}+\lvert\beta(C_0)_{ij}\rvert}"><img src="../equations/measured-error.png" alt="Componentwise error is normalized by absolute alpha AB plus absolute beta C0"/></span>. The stored err/bound and err/tol fields both include the rounding budget. "φ" data controls the exponent spread inside each row.</p>
+<!-- ============================================================ -->
+<h2>5. Performance results</h2>
+<h3>5.1 GEMM: emulation vs. cuBLAS DGEMM</h3><p>The benchmarks compare the entire emulated DGEMM call with native cuBLAS DGEMM. The square-matrix sweep shows how increasing arithmetic work amortises conversion and reconstruction costs. The HPL-shaped sweep changes k while holding m and n large. Speedup is native median time divided by emulated median time. Values above one favour emulation. The following tables and figures are calculated from the stored CSV files.</p>
+<figure><img alt="speedup over native for square sizes" src="../figs/squares.svg"/><figcaption>Fig. 1 Square GEMM. Emulation wins from
+~4096³ (11 moduli) or ~8192³ (14 moduli).</figcaption></figure>
+<figure><img alt="speedup over native for HPL shapes" src="../figs/hplshape.svg"/><figcaption>Fig. 2. HPL update shapes (k = NB), calculated from job 466571. With 14 moduli, emulation loses at the tested k values up to 2048. Fewer moduli improve speed at a lower accuracy level.</figcaption></figure>
+<table data-caption="Table 4. GEMM speedups (job 466571).">
+<tr><th>Shape m×n×k (job 466571)</th><th class="n">native ms</th><th class="n">v0, 14</th><th class="n">final, 14</th><th class="n">final, 11</th><th class="n">final, 8</th></tr>
+<tr><td>16384³</td><td class="n">163.4</td><td class="n">0.98×</td><td class="n"><b>1.51×</b></td><td class="n">1.85×</td><td class="n">2.30×</td></tr>
+<tr><td>8192³</td><td class="n">19.5</td><td class="n">0.68×</td><td class="n"><b>1.18×</b></td><td class="n">1.46×</td><td class="n">1.98×</td></tr>
+<tr><td>4096³</td><td class="n">2.26</td><td class="n">0.32×</td><td class="n">0.87×</td><td class="n">1.07×</td><td class="n">1.43×</td></tr>
+<tr><td>32768²×1024 (HPL update, NB = 1024)</td><td class="n">39.7</td><td class="n">0.41×</td><td class="n">0.59×</td><td class="n">0.70×</td><td class="n">1.05×</td></tr>
+<tr><td>16384²×256</td><td class="n">2.50</td><td class="n">0.13×</td><td class="n">0.22×</td><td class="n">0.24×</td><td class="n">0.40×</td></tr>
+<tr><td>16384×64×16384 (skinny)</td><td class="n">0.68</td><td class="n">0.02×</td><td class="n">0.08×</td><td class="n">0.10×</td><td class="n">0.13×</td></tr>
+</table>
+<p class="meta">Median of 10 calls after 3 warm-ups, data on the GPU, workspace reserved before timing. Native was re-timed after each
+shape and drifted up to 7% slower (GPU heating), so the speedups are conservative.</p>
+<figure><img alt="ablation" src="../figs/ablation.svg"/><figcaption>Fig. 3. Historical optimisation timings at 16384 cubed, 14 moduli. Values are read from jobs 435745, 441228 and 441237 and the median of the final build (second run in each A/B round) in job 466399. The native reference is from job 466571. These are separate jobs, so the bars are descriptive rather than a controlled ablation.</figcaption></figure>
+<figure><img alt="ceiling" src="../figs/ceiling.svg"/><figcaption>Fig. 4. Measured speedup from job 466571 compared with the approximate <span class="math" data-id="throughput-ceiling" data-latex="24/N"><img src="../equations/throughput-ceiling.png" alt="24/N"/></span> throughput model. The model omits conversion and reconstruction costs and is not a measured hardware limit.</figcaption></figure>
+<p><b>Where the time goes</b> (Nsight Systems, job 466571). At the HPL shape 32768²×1024 with 14 moduli: INT8 GEMM 35.5 ms (54%), CRT 28.5 ms (43%),
+convert 1.4 ms, scale 0.25 ms, versus native 38.3 ms. Both big kernels are bound by the <b>60 GB INT32 intermediate</b> (<span class="math" data-id="intermediate-bytes" data-latex="4Nmn\ \mathrm{bytes}"><img src="../equations/intermediate-bytes.png" alt="4 N m n bytes"/></span>
+written by the GEMMs, read by the CRT at ~2.4 TB/s). At small k the multiply is cheap and this traffic is the whole cost, which is why
+emulation loses there. At large k the INT8 GEMM dominates, and that is where emulation wins.</p>
+<p><b>Optimisation we considered and dropped.</b> A fused INT8 GEMM + mod epilogue (CUTLASS) storing residues as uint8 would cut that traffic 4×.
+Costed at the INT8 rate we actually reach, it lands at ~35-40 ms versus 38 ms native at the HPL shape: break-even, and &lt; 1% of the HPL score.</p>
+<h3>5.2 HPL accuracy: how many moduli does HPL need?</h3><p>HPL checks the scaled residual against a threshold of 16. The modulus sweep isolates the accuracy trade-off: reducing the number of INT8 products makes the calculation cheaper but increases truncation error. The measurements below use N = 20000 and NB = 1024 in job 461194.</p>
+<figure><img alt="residual vs moduli" src="../figs/residual.svg"/><figcaption>Fig. 5 Scaled residual grows ~16× per modulus removed, as the
+<span class="math" data-id="truncation-model" data-latex="2^{-P}"><img src="../equations/truncation-model.png" alt="2^-P"/></span> model predicts. For this tested N = 20000, NB = 1024 configuration, 11 is the smallest tested modulus count that passes.</figcaption></figure>
+<div>
+<table data-caption="Table 5. HPL residual checks (job 461194).">
+<tr><th>Moduli (N = 20000, job 461194)</th><th class="n">residual</th><th>result</th></tr>
+<tr><td>native</td><td class="n">2.1e-3</td><td>PASS</td></tr>
+<tr><td>14</td><td class="n">2.9e-3</td><td>PASS</td></tr>
+<tr><td>12</td><td class="n">0.59</td><td>PASS</td></tr>
+<tr><td>11</td><td class="n">9.6</td><td>PASS</td></tr>
+<tr><td>10</td><td class="n">165</td><td>FAIL</td></tr>
+<tr><td>9</td><td class="n">2,497</td><td>FAIL</td></tr>
+<tr><td>8</td><td class="n">36,101</td><td>FAIL</td></tr>
+</table>
+<p class="meta">Threshold 16. AUTO with tol = 0 picks native on all calls at NB = 1024 (correctly: 0.59×).</p>
+</div>
+<h3>5.3 HPL speed with our netlib HPL + shim</h3><p>Application speed depends on the fraction of time spent in GEMM. The timing breakdown below separates GPU arithmetic, PCIe transfers, CPU BLAS and remaining HPL work. These are serial-offload measurements, so the components can be stacked without double-counting overlapping work.</p>
+<figure><img alt="HPL time breakdown" src="../figs/hplbreakdown.svg"/><figcaption>Fig. 6 Serial offload, N = 60000 (job 461201): the GPU GEMM is
+2.5 s of 66.5 s (3.7%). PCIe copies, CPU BLAS and the rest of HPL dominate.</figcaption></figure>
+<table data-caption="Table 6. Serial HPL measurements (job 461201, CPU row from 461194).">
+<tr><th>Config, N = 60000 (job 461201)</th><th class="n">time s</th><th class="n">GFLOPS</th><th class="n">vs native</th><th class="n">residual</th></tr>
+<tr><td>GPU native DGEMM</td><td class="n">66.51</td><td class="n">2,165</td><td class="n">1.000</td><td class="n">2.3e-3</td></tr>
+<tr><td>emulation, 14 moduli</td><td class="n">68.21</td><td class="n">2,111</td><td class="n">0.975</td><td class="n">3.1e-3</td></tr>
+<tr><td>emulation, 11 moduli</td><td class="n">67.12</td><td class="n">2,146</td><td class="n">0.991</td><td class="n">6.3</td></tr>
+<tr><td>AUTO, tol = 0 (native on all 57 calls)</td><td class="n">66.47</td><td class="n">2,167</td><td class="n">1.001</td><td class="n">2.3e-3</td></tr>
+<tr><td>CPU only (OpenBLAS, N = 20000, job 461194)</td><td class="n">10.74</td><td class="n">497</td><td class="n">-</td><td class="n">2.2e-3</td></tr>
+</table>
+<p><b>Overlap helps everyone:</b> pipelining the copies with the GEMM cuts HPL time 14% (+16.6% GFLOPS) for native (jobs 461491, 462597).
+Emulated GEMMs then hide behind the copies (offloaded wall 8.15 s vs 8.04 s native).</p><p><b>A bug found by overlap:</b> the first pipelined version made emulated chunks 2.2× slower. The NaN/Inf check read its flag back with
+<span>cudaMemcpyAsync</span>, which queued behind the previous chunk's device→host copy. A one-thread kernel now writes
+the flag to mapped pinned memory. Emulated GEMM time fell from 5.30 s to 2.79 s, matching a run with the check disabled.</p><p><b>Fewer moduli do not help:</b> 12 or 11 moduli shorten the GPU GEMM (2.79 → 2.26 s) but not the offloaded wall time (~8.6 s): PCIe sets
+the pace (job 463015).</p>
+<h3>5.4 Comparison with NVIDIA's HPL (HPC-Benchmarks)</h3>
+<p>
+<b>Setup</b> (job 514537, <span>scripts/nvhpl.sbatch</span>). NVIDIA HPC-Benchmarks container
+<span>nvcr.io/nvidia/hpc-benchmarks:26.02.01</span> ("HPL-NVIDIA 26.2.1") run with Apptainer, 1 rank, 1 H200, the same 12 CPU cores
+and <b>the same node</b> (25a-hgpn017) as our netlib HPL runs in the same job. NVIDIA's input is its shipped
+<span>HPL-H200-1GPU.dat</span> with N and NB replaced. NVIDIA HPL rounds N = 50000 down to 49152.
+</p>
+<figure><img alt="NVIDIA HPL vs ours" src="../figs/nvhpl.svg"/><figcaption>Fig. 7 HPL score on 1× H200, same node.</figcaption></figure>
+<table data-caption="Table 7. H200 comparison (job 514537).">
+<tr><th>Implementation (job 514537)</th><th class="n">N</th><th class="n">NB</th><th class="n">time s</th><th class="n">TFLOPS</th><th class="n">residual</th><th>FP64 emulation</th></tr>
+<tr><td>NVIDIA HPL, native</td><td class="n">49,152</td><td class="n">1024</td><td class="n">2.02</td><td class="n"><b>39.25</b></td><td class="n">3.5e-4</td><td>off</td></tr>
+<tr><td>NVIDIA HPL, emulation requested</td><td class="n">49,152</td><td class="n">1024</td><td class="n">2.01</td><td class="n">39.45</td><td class="n">3.5e-4</td><td>Refused, native</td></tr>
+<tr><td>NVIDIA HPL, larger N</td><td class="n">131,072</td><td class="n">1024</td><td class="n">30.30</td><td class="n"><b>49.55</b></td><td class="n">7.6e-4</td><td>off</td></tr>
+<tr><td>Netlib + shim, native</td><td class="n">50,000</td><td class="n">1024</td><td class="n">41.10</td><td class="n">2.03</td><td class="n">2.1e-3</td><td>-</td></tr>
+<tr><td>Netlib + shim, 14 moduli</td><td class="n">50,000</td><td class="n">1024</td><td class="n">40.81</td><td class="n">2.04</td><td class="n">2.4e-3</td><td>47 GPU calls</td></tr>
+</table>
+<h3>What the comparison shows</h3>
+<p><b>NVIDIA's HPL is 19× faster on the same hardware</b> (39.3 vs 2.0 TFLOPS at N ≈ 50k). The difference is the HPL design, not the DGEMM:
+NVIDIA's built-in DGEMM test runs at 52.8 TFLOPS, about the same as the 56 TFLOPS we measure for cuBLAS DGEMM. NVIDIA keeps the whole
+matrix in GPU memory (22 GiB of HPL buffers at N = 49k), factors panels on the GPU and uses look-ahead, so the host only orchestrates.
+Our netlib HPL keeps the matrix on the host and pays PCIe for every update. Its GPU DGEMM is only 1.45 s of 41 s here.</p><p><b>In NVIDIA's HPL, DGEMM is the bottleneck.</b> At N = 131072 it reaches 49.6 TFLOPS, 94% of its own DGEMM rate. That is the setting where a
+faster GEMM would raise the score. In ours, DGEMM is ~4% of the time, so even an infinitely fast GEMM gains at most ~4%. This is why our
+HPL score cannot show the emulation's GEMM speedup.</p><p><b>NVIDIA does not use FP64 emulation on the H200 either.</b> NVIDIA's HPL contains an Ozaki-II emulated DGEMM (a cuBLASLt
+<span>ozaki2</span> kernel, with the GEMMul8 license shipped alongside), selected with <span>HPL_EMULATE_DOUBLE_PRECISION</span>
+(1 = Ozaki-I, 2 = Ozaki-II) and tuned with <span>HPL_DOUBLE_PRECISION_EMULATION_NUM_MODULI</span>. On the H200 it prints
+<span>"HPL WARNING: HPL_EMULATE_DOUBLE_PRECISION is supported only on SM100 or newer"</span> and runs native: the residual is
+bit-identical to the native run (0.000354203724).</p><p><b>This agrees with our own measurements.</b> On the H200, 14-moduli emulation runs at 0.59× native at k = 1024 and 0.87× at k = 2048-4096, so
+inside a DGEMM-bound HPL it would <i>lower</i> the score. Emulation needs a GPU where INT8/FP64 is much larger than 24×, or a large NB.
+Figure 2 shows the measured dependence on the inner dimension k for our H200 implementation.</p>
+<!-- ============================================================ -->
+<h2>6. Failure cases and scope</h2>
+<table data-caption="Table 8. Failure cases and limits.">
+<tr><th>Case</th><th>What happens</th><th>Why</th></tr>
+<tr><td>Small k (≤ 2048), skinny, small squares</td><td>0.1-0.9× native, AUTO routes to native</td><td>INT32 intermediate traffic dominates, launch overheads</td></tr>
+<tr><td>HPL trailing updates (k = NB = 1024)</td><td>0.59× (14 moduli), 0.70× (11)</td><td>small-k regime</td></tr>
+<tr><td>φ = 2 data at tol = 0</td><td>fallback, reason 4</td><td>strict target exceeds available retained precision. Offline maximum log2 R is about 12.4 for the checked sample</td></tr>
+<tr><td>φ = 4 data at every tested tolerance</td><td>fallback, reason 4</td><td>level 2 still produces a zero lower bound. The stored log2_ratio = 1048576 is a sentinel, not the true ratio</td></tr>
+<tr><td>tol tighter than native's own error (1e-15 on wide-exponent data)</td><td>fallback, native's result may also miss tol</td><td>fallback does not certify the requested target. Native DGEMM also exceeds it on these samples</td></tr>
+<tr><td>k &gt; 131056</td><td>fallback, reason 2</td><td>INT32 accumulator would overflow</td></tr>
+<tr><td>netlib HPL score</td><td>no gain (± noise)</td><td>matrix on host, PCIe/CPU-bound (§5.3-5.4)</td></tr>
+</table>
+<p><b>Where this approach pays.</b> On an H200: k &gt;~ 4096-8192, or looser tolerances (8-11 moduli). A larger INT8-to-FP64 throughput ratio could increase the benefit, but the projected gains below require validation on the target GPU.
+Rescaling our fitted cost model to RTX 5090 datasheet peaks (FP64 1.6 TFLOPS, INT8 838 TOPS, 1.8 TB/s,
+<span>scripts/project_gpu.py</span>) projects ~21× over native at 16384³ and ~10× at the HPL shape with 14 moduli.
+<i>That is a projection, not a measurement.</i> For HPL itself, the GEMM must be the bottleneck: a GPU-resident HPL like NVIDIA's.</p>
+<!-- ============================================================ -->
+<h2>7. Data sources and analysis method</h2>
+<h3>7.1 Test data</h3>
+<p><b>Uniform [−0.5, 0.5)</b>, HPL's own generator distribution: the "HPL-like" case.</p><p><b>φ family</b>: <span class="math" data-id="phi-distribution" data-latex="(\operatorname{rand}-0.5)\exp\!\left(\varphi\operatorname{randn}\right)"><img src="../equations/phi-distribution.png" alt="(rand - 0.5) exp(phi randn)"/></span>. φ controls the exponent spread inside a row, which drives how
+many moduli are needed. φ = 0.5, 1, 2, 4.</p><p><b>Adversarial:</b> rows scaled by <span class="math" data-id="adversarial-exponents" data-latex="2^{\pm300}"><img src="../equations/adversarial-exponents.png" alt="2^(+/-300)"/></span>, zero rows/columns, NaN/Inf, 1×1×1, odd shapes, padded leading dimensions, all transposes.</p><p><b>Shapes:</b> squares 1024-16384 (throughput), HPL updates m = n  in  {8192, 16384, 32768} × k  in  {256…2048}, skinny (n = 64, 256) and tall (65536×1024×1024).</p>
+<h3>7.2 Measurement rules</h3>
+<p>All timing inside Slurm jobs on compute nodes (never the login node). Each job writes <span>env.txt</span> with host, GPU, clocks,
+driver and git commit (<span>dirty=0</span>).</p><p>Native, v0 and final are always timed <b>in the same job on the same GPU</b>. Native is re-timed at the end of each shape to detect drift.</p><p>One whole <span>ozd_dgemm</span> call is timed (CUDA events), median of 10 after 3 warm-ups. Per-stage times come from a separate
+profiled call, so profiling never inflates the reported times.</p><p>A/B comparisons of two builds alternate rounds (<span>scripts/abtest.sbatch</span>). We learned this the hard way: v2 first looked 6-8%
+slower than v1 only because native DGEMM had just heated the GPU (job 461435 vs. the fair re-run 461490: within 0.5%).</p><p>HPL totals vary by up to ~20% between jobs on shared nodes (host work), so HPL configs are compared <b>within one job</b>,
+using the shim's offloaded wall time.</p>
+<h3>7.3 Provenance of every number</h3>
+<table data-caption="Table 9. Result provenance.">
+<tr><th>Job</th><th>What it measured</th><th>Job</th><th>What it measured</th></tr>
+<tr><td>466571</td><td>final vs v0 vs native, test suite, Nsight</td><td>461201</td><td>HPL N = 60000, serial offload</td></tr>
+<tr><td>466503</td><td>cost-model refit, adaptive sweep</td><td>461194</td><td>HPL residual vs moduli</td></tr>
+<tr><td>466399</td><td>A/B batched vs per-modulus GEMM</td><td>461491, 462597</td><td>HPL overlapped copies</td></tr>
+<tr><td>462933</td><td>level-2 adaptive bound</td><td>463015</td><td>HPL overlapped, 14/12/11 moduli</td></tr>
+<tr><td>461134, 462595</td><td>adaptive sweep (repeat identical)</td><td>466542</td><td>HPL, no allocation in timed solve</td></tr>
+<tr><td>435745, 441228, 441237</td><td>v0, v1, v1 + integer CRT</td><td>514537</td><td>NVIDIA HPL vs ours, same H200 node</td></tr>
+</table>
+<p><b>Excluded record.</b> Job 514579 is excluded because its recorded hardware label conflicts with the project's confirmed hardware. Its original files are preserved unchanged for traceability. None of its timings or conclusions is used in this report.</p>
+<!-- ============================================================ -->
+<h2>8. AI collaboration</h2>
+<p>The project was built with an AI coding agent (Claude Code, Anthropic), driven and reviewed by the student. The workflow is
+described so others can reuse it.</p><p>The final report layout and plotting scripts were revised with Codex using the same experimental result files.</p>
+<h3>8.1 Division of labour</h3>
+<table data-caption="Table 10. AI collaboration responsibilities.">
+<tr><th>Student</th><th>AI agent</th></tr>
+<tr><td>Set the goals, constraints and success criteria, picked among the agent's proposals, and set the rule "every number cites a job".</td>
+<td>Wrote most of the code: library, tests, benchmark, HPL shim and patch, Slurm and analysis scripts.</td></tr>
+<tr><td>Reviewed every design choice and result, decided what to keep, drop or redo.</td>
+<td>Submitted Slurm jobs on nano4 through a relay CLI, read logs and Nsight summaries, proposed the next experiment.</td></tr>
+<tr><td>Took the TA's feedback (e.g. "compare with NVIDIA's HPL") and turned it into tasks.</td>
+<td>Drafted the reports and README from the committed logs, and this comparison.</td></tr>
+</table>
+<h3>8.2 Practices that made it trustworthy</h3>
+<p><b>Results are files, not chat.</b> Each recorded job stores <span>results/&lt;job&gt;/</span> with its environment and experimental commit identifier. Reports quote job IDs, so measurements can be checked against the included files.</p><p><b>Test before believing.</b> The double-double reference and the per-entry bound were written first. Every optimisation had to keep
+"0 failures" and bitwise determinism.</p>
+<h3>8.3 Where the AI was wrong, and how it was caught</h3>
+<p><b>Over-claim on φ data.</b> A draft said 14 moduli "would have been enough" for φ = 2 at tol = 0. Computing the exact ratio offline
+(numpy) showed &gt; 16 moduli are needed, so the fallback is correct. The claim was retracted, and the real gap (looser tolerances) was
+fixed with the level-2 bound.</p><p><b>False regression.</b> An A/B showed v2 6-8% slower. It was GPU heating from a preceding native run. Re-running both builds alike
+removed it, and <span>abtest.sbatch</span> now enforces that.</p><p><b>Hidden serialisation.</b> Overlap made emulation 2.2× slower. Profiling traced it to a flag read-back on the copy engine (§5.3).</p><p><b>Hand-edited patch.</b> A hand edit broke the hunk counts of <span>hpl-ozd.patch</span>. It was regenerated with
+<span>diff -u</span> and the build script verifies it applies.</p><p><b>Plans costed with real rates.</b> The fused CUTLASS kernel was dropped after costing it at the INT8 rate actually achieved, not the peak.</p>
+<h3>8.4 External code used</h3>
+<p>Used: netlib HPL 2.3 (tarball + 3-line patch), cuBLAS INT8 and FP64 GEMM, NVIDIA HPC-Benchmarks container (only as a comparison point).</p><p>Not used in the library: GEMMul8 and cuBLAS FP64 emulation.</p>
+<!-- ============================================================ -->
+<h2>9. Reproduce it</h2>
+<pre>cd hw2
+module load x86-nvhpc/26.3
+make -j
+sbatch scripts/bench.sbatch
+bash scripts/build_hpl.sh
+N=50000 CONFIGS="native emu:14 emu:11 autotol:0" sbatch scripts/hpl.sbatch
+apptainer pull hpc-benchmarks-26.02.01.sif docker://nvcr.io/nvidia/hpc-benchmarks:26.02.01
+SIF=$PWD/hpc-benchmarks-26.02.01.sif sbatch scripts/nvhpl.sbatch
+python3 scripts/report_figs.py 514537</pre>
+<p class="meta">Repository layout: <span>include/</span> API · <span>src/</span> implementation ·
+<span>tests/</span> suite and reference · <span>bench/</span> benchmark · <span>hpl/</span> shim, patch, Make template ·
+<span>scripts/</span> jobs, fits, figures · <span>results/</span> raw logs · <span>docs/</span> reports.</p>
+</body>
+</html>

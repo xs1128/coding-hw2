@@ -1,0 +1,14 @@
+build/
+third_party/hpl-2.3/
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+results/*/tmp/
+baseline-v*/
+results/*/run-*/
+
+.DS_Store
+
+__pycache__/
+
+*.pyc
