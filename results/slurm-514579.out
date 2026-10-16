@@ -1,0 +1,31 @@
+host=25a-ggpn01 date=2026-10-08T11:17:12+08:00 commit=39c67b2 cpus=12
+sif=/work/u1131128/hw2-sif/hpc-benchmarks-26.02.01-arm64.sif
+NVIDIA GB200, 580.105.08, 2062 MHz, 1200.00 W, 189471 MiB
+CPU(s):                                  144
+Model name:                              Neoverse-V2
+CPU(s) scaling MHz:                      100%
+== g142k-nb1024:142264:1024
+[WARNING] Change Input N 142264 to 141312
+||Ax-b||_oo/(eps*(||A||_oo*||x||_oo+||b||_oo)*N)=   0.000217798039 ...... PASSED
+== g142k-nb4096:142264:4096
+[WARNING] Change Input N 142264 to 139264
+||Ax-b||_oo/(eps*(||A||_oo*||x||_oo+||b||_oo)*N)=   0.000223446669 ...... PASSED
+== g142k-emu2:142264:4096:2
+[WARNING] Change Input N 142264 to 139264
+HPL WARNING: [EXPERIMENTAL]: DGEMM with Ozaki-II scheme will be used
+||Ax-b||_oo/(eps*(||A||_oo*||x||_oo+||b||_oo)*N)=   0.000179213109 ...... PASSED
+== g142k-emu1:142264:4096:1
+[WARNING] Change Input N 142264 to 139264
+||Ax-b||_oo/(eps*(||A||_oo*||x||_oo+||b||_oo)*N)=   0.000328885985 ...... PASSED
+== g49k:49152:1024
+||Ax-b||_oo/(eps*(||A||_oo*||x||_oo+||b||_oo)*N)=   0.000344167724 ...... PASSED
+== g49k-emu2:49152:1024:2
+HPL WARNING: [EXPERIMENTAL]: DGEMM with Ozaki-II scheme will be used
+||Ax-b||_oo/(eps*(||A||_oo*||x||_oo+||b||_oo)*N)=   0.000291704789 ...... PASSED
+impl,config,N,NB,time_s,gflops,residual,status,nv_emulation
+nvidia,g142k-nb1024,141312,1024,50.19,3.748e+04,0.000217798039,PASSED,no
+nvidia,g142k-nb4096,139264,4096,51.91,3.469e+04,0.000223446669,PASSED,no
+nvidia,g142k-emu2,139264,4096,16.87,1.067e+05,0.000179213109,PASSED,ozaki2
+nvidia,g142k-emu1,139264,4096,25.30,7.117e+04,0.000328885985,PASSED,no
+nvidia,g49k,49152,1024,2.48,3.194e+04,0.000344167724,PASSED,no
+nvidia,g49k-emu2,49152,1024,1.48,5.354e+04,0.000291704789,PASSED,ozaki2

@@ -1,0 +1,230 @@
+{
+  "integer-inputs": {
+    "width": 29.323686176836866,
+    "ascent": 9.014555417185557,
+    "descent": 2.4482590286425907,
+    "fontSize": 11
+  },
+  "moduli-range": {
+    "width": 83.26630136986302,
+    "ascent": 8.102256537982566,
+    "descent": 3.3604184308841845,
+    "fontSize": 11
+  },
+  "input-residues": {
+    "width": 137.01827148194275,
+    "ascent": 9.014555417185557,
+    "descent": 3.3758107098381074,
+    "fontSize": 11
+  },
+  "residue-product": {
+    "width": 114.84396513075966,
+    "ascent": 9.09226400996264,
+    "descent": 3.3758107098381074,
+    "fontSize": 11
+  },
+  "output-residue": {
+    "width": 60.59056537982566,
+    "ascent": 9.014555417185557,
+    "descent": 3.3758107098381074,
+    "fontSize": 11
+  },
+  "crt-range": {
+    "width": 142.42056288916567,
+    "ascent": 21.512069738480697,
+    "descent": 14.561285180572854,
+    "fontSize": 11
+  },
+  "toy-modulus-product": {
+    "width": 75.44737235367373,
+    "ascent": 8.22326276463263,
+    "descent": 1.0842640099626402,
+    "fontSize": 11
+  },
+  "toy-residues": {
+    "width": 143.8801095890411,
+    "ascent": 9.09226400996264,
+    "descent": 3.1522590286425904,
+    "fontSize": 11
+  },
+  "negative-residues": {
+    "width": 67.91878455790784,
+    "ascent": 9.09226400996264,
+    "descent": 3.1522590286425904,
+    "fontSize": 11
+  },
+  "modulus-capacity": {
+    "width": 44.32591780821918,
+    "ascent": 10.107955168119554,
+    "descent": 0.9962640099626402,
+    "fontSize": 11
+  },
+  "precision-54": {
+    "width": 33.558256537982565,
+    "ascent": 8.22326276463263,
+    "descent": 1.1392677459526777,
+    "fontSize": 11
+  },
+  "throughput-ceiling": {
+    "width": 25.697534246575348,
+    "ascent": 8.795267745952678,
+    "descent": 1.9752627646326277,
+    "fontSize": 11
+  },
+  "gemm-update": {
+    "width": 71.52458281444582,
+    "ascent": 8.883247820672478,
+    "descent": 3.372254047322541,
+    "fontSize": 11
+  },
+  "scaled-product-bound": {
+    "width": 90.88481195516812,
+    "ascent": 15.264019925280202,
+    "descent": 8.037011207970112,
+    "fontSize": 11
+  },
+  "precision-bits": {
+    "width": 91.78623163138232,
+    "ascent": 17.560657534246577,
+    "descent": 11.25897882938979,
+    "fontSize": 11
+  },
+  "crt-reconstruction": {
+    "width": 309.79842590286427,
+    "ascent": 21.48457285180573,
+    "descent": 15.207970112079703,
+    "fontSize": 11
+  },
+  "modulus-size": {
+    "width": 20.786899128268995,
+    "ascent": 10.107955168119554,
+    "descent": 0.9962640099626402,
+    "fontSize": 11
+  },
+  "error-bound": {
+    "width": 290.6912378580324,
+    "ascent": 13.404264009962642,
+    "descent": 6.388582814445829,
+    "fontSize": 11
+  },
+  "unit-roundoff": {
+    "width": 21.780204234122046,
+    "ascent": 10.123357409713575,
+    "descent": 0.9962640099626402,
+    "fontSize": 11
+  },
+  "gemm-loop-rule": {
+    "width": 137.28980323785805,
+    "ascent": 8.751252801992528,
+    "descent": 2.4482590286425907,
+    "fontSize": 11
+  },
+  "requested-accuracy": {
+    "width": 180.68148443337486,
+    "ascent": 11.380254047322541,
+    "descent": 6.388582814445829,
+    "fontSize": 11
+  },
+  "positive-tolerance": {
+    "width": 32.74055292652553,
+    "ascent": 8.633962640099627,
+    "descent": 1.1466600249066004,
+    "fontSize": 11
+  },
+  "native-error-scale": {
+    "width": 48.66742714819428,
+    "ascent": 10.123357409713575,
+    "descent": 1.1062615193026153,
+    "fontSize": 11
+  },
+  "rounding-budget": {
+    "width": 179.48951432129516,
+    "ascent": 11.677549190535492,
+    "descent": 6.388582814445829,
+    "fontSize": 11
+  },
+  "large-c-input": {
+    "width": 15.83583561643836,
+    "ascent": 10.123357409713575,
+    "descent": 0.9962640099626402,
+    "fontSize": 11
+  },
+  "unrepresentable-result": {
+    "width": 34.09021170610212,
+    "ascent": 10.123357409713575,
+    "descent": 1.4362640099626403,
+    "fontSize": 11
+  },
+  "adaptive-condition": {
+    "width": 187.09973599003737,
+    "ascent": 17.67495890410959,
+    "descent": 13.538540473225405,
+    "fontSize": 11
+  },
+  "level-one-quantization": {
+    "width": 58.632468244084684,
+    "ascent": 10.330052303860525,
+    "descent": 4.653459526774596,
+    "fontSize": 11
+  },
+  "adaptive-precision": {
+    "width": 155.4856687422167,
+    "ascent": 15.066012453300127,
+    "descent": 8.037011207970112,
+    "fontSize": 11
+  },
+  "level-two-split": {
+    "width": 194.15747945205482,
+    "ascent": 15.792009962640101,
+    "descent": 8.169016189290163,
+    "fontSize": 11
+  },
+  "hpl-offload-rule": {
+    "width": 137.12482191780825,
+    "ascent": 8.633962640099627,
+    "descent": 2.4482590286425907,
+    "fontSize": 11
+  },
+  "adaptive-error-target": {
+    "width": 109.13177584059777,
+    "ascent": 8.96055790784558,
+    "descent": 6.388582814445829,
+    "fontSize": 11
+  },
+  "adversarial-exponents": {
+    "width": 26.84677459526775,
+    "ascent": 10.123357409713575,
+    "descent": 0.9962640099626402,
+    "fontSize": 11
+  },
+  "large-row-scale": {
+    "width": 20.90240597758406,
+    "ascent": 10.123357409713575,
+    "descent": 0.9962640099626402,
+    "fontSize": 11
+  },
+  "measured-error": {
+    "width": 114.59554669987547,
+    "ascent": 15.261449564134498,
+    "descent": 11.418420921544211,
+    "fontSize": 11
+  },
+  "intermediate-bytes": {
+    "width": 57.32076712328767,
+    "ascent": 8.633962640099627,
+    "descent": 3.3702814445828144,
+    "fontSize": 11
+  },
+  "truncation-model": {
+    "width": 19.246904109589043,
+    "ascent": 10.369743462017436,
+    "descent": 0.9962640099626402,
+    "fontSize": 11
+  },
+  "phi-distribution": {
+    "width": 111.85626899128269,
+    "ascent": 9.09226400996264,
+    "descent": 3.383262764632628,
+    "fontSize": 11
+  }
+}

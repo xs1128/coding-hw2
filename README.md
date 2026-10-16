@@ -3,6 +3,8 @@
 Coding-Basic HW2, default topic (Adaptive FP64 GEMM Emulation + HPL).
 Target: NCHC nano4, NVIDIA H200 (sm_90), CUDA 13.1 / cuBLAS 13.2 from NVHPC 26.3.
 
+Public repository: https://github.com/xs1128/coding-hw2
+
 ## Build
 
 ```bash
@@ -193,6 +195,10 @@ SIF=$PWD/hpc-benchmarks-26.02.01.sif sbatch scripts/nvhpl.sbatch
   N = 50000. NVIDIA keeps the matrix on the GPU and is DGEMM-bound; its FP64
   emulation (`HPL_EMULATE_DOUBLE_PRECISION`) is refused on sm_90 ("supported
   only on SM100 or newer") and runs native, bit-identical residual.
+Job 514579 is excluded from the final report and figures because its hardware
+label conflicts with the student's confirmed H200 / RTX 5090 setup. The original
+logs remain unchanged in `results/514579/` and `results/slurm-514579.out`; they
+are not evidence for the reported results.
 
 ## Layout
 
@@ -204,12 +210,37 @@ bench/bench.cu        end-to-end benchmark (CSV)
 hpl/                  cblas_dgemm shim, HPL patch and Make.ozd template
 scripts/              Slurm job scripts, HPL build, cost-model fit, projections
 results/<jobid>/      raw results (env.txt, test.txt, bench.csv, HPL logs)
-REPORT.md             short report (start here)
-docs/final-report/    final report (report.pdf, its HTML source) and video script
+docs/final-report/    final report (report.pdf, start here; its HTML source) and video script
 docs/figs/            report figures (scripts/report_figs.py)
 docs/                 10/7 discussion report
 third_party/          hpl-2.3.tar.gz from netlib (sha256 32c5c17d...)
 ```
+
+## Rebuild the final report
+
+The final report uses a plain, single-column A4 layout with justified
+paragraphs and continuous pagination. Longer tables repeat their column
+headers when they continue onto another page. Body text, tables,
+page numbers, and chart labels use Times New Roman. Equations are written
+in LaTeX and rendered by XeLaTeX with STIX Two Math, which matches the
+Times style. The report embeds vector equations for sharp printing and
+includes their LaTeX source in `docs/equations/formulas.tex`. The chart script reads
+the committed CSV files directly, including the historical optimisation
+measurements, and saves monochrome SVG and high-resolution PNG figures.
+
+On macOS with Times New Roman, STIX Two Math, Swift, XeLaTeX, and Poppler
+(`pdfseparate` and `pdftocairo`) available:
+
+```bash
+python3 -m pip install -r scripts/requirements-report.txt
+python3 scripts/build_report.py
+```
+
+This regenerates `docs/figs/`, `docs/equations/`, and `docs/final-report/report.pdf` from
+`docs/final-report/report.html` and `results/`. The native CoreText renderer
+embeds Times New Roman, including its bold and italic variants, in the PDF.
+For the figures on another OS, set `TNR_FONT_DIR` to the directory containing
+the installed Times New Roman TTF files. The PDF renderer requires macOS.
 
 ## AI and external code
 
@@ -234,7 +265,7 @@ path) are called.
 - On an H200 native FP64 is strong (INT8 is only ~24x faster in practice), so
   14-moduli emulation wins only for large k (1.18x at 8192^3, 1.51x at
   16384^3, 0.87x at 4096^3); the ceiling is 24/N x for N moduli. See
-  `REPORT.md`.
+  `docs/final-report/report.pdf`.
 - Running HPL through the shim cannot show a large gain on one H200: netlib
   HPL keeps the matrix on the host, so PCIe copies and host work dominate.
 - The cost model and the GEMM loop/batched threshold are tuned on one H200

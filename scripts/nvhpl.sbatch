@@ -4,7 +4,7 @@
 #   SIF=/path/hpc-benchmarks-26.02.01.sif sbatch scripts/nvhpl.sbatch
 # NV_RUNS entries: <name>:<N>:<NB>[:<emulation mode>]  (mode 2 = Ozaki-II)
 # OZD_CONFIGS: as CONFIGS in hpl.sbatch, run at N=$OZD_N with our build/xhpl
-# (empty: NVIDIA runs only).
+# (empty: NVIDIA runs only). The reported comparison uses H200.
 # Results: results/<jobid>/nv-<name>.out, hpl-<config>.out, summary.csv
 #SBATCH --account=ACD110018
 #SBATCH --job-name=nv-hpl

@@ -1,0 +1,6 @@
+host=25a-ggpn01 date=2026-10-08T11:17:12+08:00 commit=39c67b2 cpus=12
+sif=/work/u1131128/hw2-sif/hpc-benchmarks-26.02.01-arm64.sif
+NVIDIA GB200, 580.105.08, 2062 MHz, 1200.00 W, 189471 MiB
+CPU(s):                                  144
+Model name:                              Neoverse-V2
+CPU(s) scaling MHz:                      100%

@@ -326,8 +326,7 @@ It stays optional.
    (large k, and GPUs with weak FP64) and the profiling evidence.
 
 **Questions for the TA:**
-- Is cuBLAS's INT8 GEMM acceptable as a building block? Our own v0 serves as
-  the baseline, since no starter code was given.
+- Is cuBLAS's INT8 GEMM acceptable as a building block?
 - Is measuring on the H200 instead of the RTX 5090 acceptable, with the
   projection above?
 

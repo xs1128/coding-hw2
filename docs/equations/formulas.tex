@@ -1,0 +1,60 @@
+\documentclass{article}
+\usepackage{amsmath,fontspec,unicode-math}
+\setmainfont{Times New Roman}
+\setmathfont{STIX Two Math}
+\setmathrm{Times New Roman}
+\pagestyle{empty}
+\hoffset=-1in
+\voffset=-1in
+\newbox\eqbox
+\newwrite\metrics
+\immediate\openout\metrics=formulas.metrics
+\newcommand{\emit}[3]{%
+  \setbox\eqbox=\hbox{\fontsize{#2bp}{#2bp}\selectfont$#3$}%
+  \immediate\write\metrics{#1,\the\wd\eqbox,\the\ht\eqbox,\the\dp\eqbox}%
+  \dimen0=\wd\eqbox\advance\dimen0 by 2pt
+  \dimen2=\ht\eqbox\advance\dimen2 by\dp\eqbox\advance\dimen2 by 2pt
+  \shipout\vbox{\offinterlineskip\special{papersize=\the\dimen0,\the\dimen2}%
+    \kern1pt\hbox{\kern1pt\box\eqbox\kern1pt}\kern1pt}%
+}
+\begin{document}
+\emit{integer-inputs}{11}{A',\ B'}
+\emit{moduli-range}{11}{m_1,\ldots,m_N\leq256}
+\emit{input-residues}{11}{A'\bmod m_t\quad\text{and}\quad B'\bmod m_t}
+\emit{residue-product}{11}{(A'\bmod m_t)(B'\bmod m_t)}
+\emit{output-residue}{11}{A'B'\bmod m_t}
+\emit{crt-range}{11}{\displaystyle \lvert A'B'\rvert_{ij}<\frac{M}{2},\qquad M=\prod_{t=1}^{N}m_t}
+\emit{toy-modulus-product}{11}{M=7\cdot11=77}
+\emit{toy-residues}{11}{(30\bmod7,\ 30\bmod11)=(2,8)}
+\emit{negative-residues}{11}{-20\longmapsto(1,2)}
+\emit{modulus-capacity}{11}{M\approx2^{110}}
+\emit{precision-54}{11}{P=54}
+\emit{throughput-ceiling}{11}{24/N}
+\emit{gemm-update}{11}{C=\alpha AB+\beta C}
+\emit{scaled-product-bound}{11}{\displaystyle \lvert A'B'\rvert_{ij}<2^{2P}\leq\frac{M}{4}}
+\emit{precision-bits}{11}{\displaystyle P=\left\lfloor\frac{\lfloor\log_2 M\rfloor-2}{2}\right\rfloor}
+\emit{crt-reconstruction}{11}{\displaystyle X=\left(\sum_{t=1}^{N}c_tS_t\right)\bmod M,\qquad S_t=M_t\left(M_t^{-1}\bmod m_t\right),\qquad M_t=\frac{M}{m_t}}
+\emit{modulus-size}{11}{2^{100}}
+\emit{error-bound}{11}{\displaystyle \lvert\widehat C-C_{\mathrm{exact}}\rvert_{ij}\leq4\sqrt{k}\,2^{-P}\lvert\alpha\rvert\lVert A_i\rVert_2\lVert B_j\rVert_2+4u\left(\lvert\alpha\rvert\lvert A\rvert\lvert B\rvert+\lvert\beta C_0\rvert\right)_{ij}}
+\emit{unit-roundoff}{11}{2^{-53}}
+\emit{gemm-loop-rule}{11}{k\geq2048\quad\text{and}\quad m,n\geq1024}
+\emit{requested-accuracy}{11}{\displaystyle \lvert\widehat C-C_{\mathrm{exact}}\rvert_{ij}\leq\tau\lvert\alpha\rvert\left(\lvert A\rvert\lvert B\rvert\right)_{ij}+E_{\mathrm{round},ij}}
+\emit{positive-tolerance}{11}{\tau=\operatorname{tol}}
+\emit{native-error-scale}{11}{\tau=k\,2^{-53}}
+\emit{rounding-budget}{11}{\displaystyle E_{\mathrm{round},ij}=4u\left(\lvert\alpha\rvert\left(\lvert A\rvert\lvert B\rvert\right)_{ij}+\lvert\beta(C_0)_{ij}\rvert\right)}
+\emit{large-c-input}{11}{2^{53}}
+\emit{unrepresentable-result}{11}{2^{53}+1}
+\emit{adaptive-condition}{11}{\displaystyle 4\sqrt{k}\,2^{-P}R\leq\tau,\qquad R=\max_{i,j}\frac{\lVert A_i\rVert_2\lVert B_j\rVert_2}{\left(\lvert A\rvert\lvert B\rvert\right)_{ij}}}
+\emit{level-one-quantization}{11}{\displaystyle \left\lfloor\lvert a\rvert\,2^{6-a_{\max,i}}\right\rfloor}
+\emit{adaptive-precision}{11}{\displaystyle P\geq\log_2R+2+\frac{1}{2}\log_2k-\log_2\tau}
+\emit{level-two-split}{11}{\displaystyle h=\lfloor s\rfloor,\quad l=\lfloor128(s-h)\rfloor,\quad s\geq h+\frac{l}{128}}
+\emit{hpl-offload-rule}{11}{M,N\geq1024\quad\text{and}\quad K\geq128}
+\emit{adaptive-error-target}{11}{\tau\lvert\alpha\rvert\left(\lvert A\rvert\lvert B\rvert\right)_{ij}+E_{\mathrm{round},ij}}
+\emit{adversarial-exponents}{11}{2^{\pm300}}
+\emit{large-row-scale}{11}{2^{300}}
+\emit{measured-error}{11}{\max_{i,j}\frac{\lvert\widehat C-C_{\mathrm{ref}}\rvert_{ij}}{\lvert\alpha\rvert\left(\lvert A\rvert\lvert B\rvert\right)_{ij}+\lvert\beta(C_0)_{ij}\rvert}}
+\emit{intermediate-bytes}{11}{4Nmn\ \mathrm{bytes}}
+\emit{truncation-model}{11}{2^{-P}}
+\emit{phi-distribution}{11}{(\operatorname{rand}-0.5)\exp\!\left(\varphi\operatorname{randn}\right)}
+\immediate\closeout\metrics
+\end{document}

@@ -6,3 +6,9 @@ third_party/hpl-2.3/
 results/*/tmp/
 baseline-v*/
 results/*/run-*/
+
+.DS_Store
+
+__pycache__/
+
+*.pyc
