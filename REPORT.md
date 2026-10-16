@@ -1,6 +1,6 @@
 # ozdgemm: FP64 GEMM emulation on INT8 Tensor Cores
 
-HW2, default topic. Raw data: `results/<job>/`. Details: `docs/report-1007.md`.
+HW2, default topic. Raw data: `results/<job>/`. Full report: `docs/final-report/report.pdf`.
 
 ## Setup
 - **Hardware and software:** nano4, 1× H200, CUDA 13.1 / cuBLAS 13.2. nano4
@@ -84,6 +84,15 @@ smaller tile for the batched call, which the per-modulus loop fixes.
   offloaded), so HPL is PCIe-bound and emulation neither helps nor hurts.
   AUTO keeps native.
 - **Timed region:** no allocation inside the timed solve (`late_allocs=0`).
+
+## Comparison with NVIDIA's HPL (job 514537)
+- **Same H200 node, 12 cores:** NVIDIA HPL (hpc-benchmarks 26.02.01)
+  **39.3 TFLOPS** at N = 49152 and 49.6 at N = 131072; ours **2.0** (native
+  and emu:14 alike). NVIDIA's DGEMM runs at about the same speed as cuBLAS for us (52.8 vs. 56 TFLOPS);
+  its matrix stays on the GPU, so its HPL runs at 94% of DGEMM.
+- **NVIDIA's emulation is off on the H200** ("supported only on SM100 or
+  newer"): it runs native, bit-identical residual. This matches our finding
+  that emulation does not pay at HPL shapes on Hopper.
 
 ## Failure cases and scope
 - Small k, skinny shapes and small squares run at 0.1–0.9× native; AUTO

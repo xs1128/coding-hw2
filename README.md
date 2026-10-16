@@ -177,6 +177,23 @@ Results (1 rank, NB = 1024):
 - Total HPL time varies by up to ~20% between runs on shared nodes (host-side
   work), so compare `shim_wall_s` in `summary.csv` within one job.
 
+## Comparison with NVIDIA's HPL
+
+`scripts/nvhpl.sbatch` runs NVIDIA's HPL (HPC-Benchmarks container, Apptainer)
+and our `build/xhpl` in one job on the same node; `scripts/nvhpl_summary.py`
+writes `nv-summary.csv`.
+
+```bash
+apptainer pull hpc-benchmarks-26.02.01.sif docker://nvcr.io/nvidia/hpc-benchmarks:26.02.01
+SIF=$PWD/hpc-benchmarks-26.02.01.sif sbatch scripts/nvhpl.sbatch
+```
+
+- **H200, same node** (job 514537): NVIDIA HPL 39.3 TFLOPS (N = 49152) and
+  49.6 TFLOPS (N = 131072); ours 2.03 (native) / 2.04 (emu:14) TFLOPS at
+  N = 50000. NVIDIA keeps the matrix on the GPU and is DGEMM-bound; its FP64
+  emulation (`HPL_EMULATE_DOUBLE_PRECISION`) is refused on sm_90 ("supported
+  only on SM100 or newer") and runs native, bit-identical residual.
+
 ## Layout
 
 ```
@@ -188,7 +205,9 @@ hpl/                  cblas_dgemm shim, HPL patch and Make.ozd template
 scripts/              Slurm job scripts, HPL build, cost-model fit, projections
 results/<jobid>/      raw results (env.txt, test.txt, bench.csv, HPL logs)
 REPORT.md             short report (start here)
-docs/                 detailed report
+docs/final-report/    final report (report.pdf, its HTML source) and video script
+docs/figs/            report figures (scripts/report_figs.py)
+docs/                 10/7 discussion report
 third_party/          hpl-2.3.tar.gz from netlib (sha256 32c5c17d...)
 ```
 
