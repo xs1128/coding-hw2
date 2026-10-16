@@ -1,0 +1,3 @@
+config,N,NB,time_s,gflops,residual,status,gpu_calls,emulated,moduli,gpu_gflop,h2d_s,gemm_s,d2h_s,cpu_blas_s,shim_wall_s,late_allocs
+native,50000,1024,41.10,2.0275e+03,2.10641927e-03,PASSED,47,0,0,80791.8,7.92,1.45,6.57,7.87,8.46,0
+emu:14,50000,1024,40.81,2.0420e+03,2.43773616e-03,PASSED,47,47,14,80791.8,6.51,2.79,6.51,7.70,7.53,0

@@ -1,0 +1,6 @@
+impl,config,N,NB,time_s,gflops,residual,status,nv_emulation
+nvidia,n50k,49152,1024,2.02,3.925e+04,0.000354203724,PASSED,no
+nvidia,n50k-emu2,49152,1024,2.01,3.945e+04,0.000354203724,PASSED,refused(sm<100)
+nvidia,n131k,131072,1024,30.30,4.955e+04,0.000762459535,PASSED,no
+ozd-netlib,native,50000,1024,41.10,2.0275e+03,2.10641927e-03,PASSED,
+ozd-netlib,emu:14,50000,1024,40.81,2.0420e+03,2.43773616e-03,PASSED,
